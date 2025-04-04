@@ -19,6 +19,82 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 // Middleware для работы с сессиями
 bot.use(session());
 
+// Добавьте этот middleware перед bot.use(stage.middleware())
+bot.use(async (ctx, next) => {
+  try {
+    // Если пользователь находится в сцене (заполняет форму) - не прерываем процесс
+    if (ctx.session && ctx.session.__scenes && ctx.session.__scenes.current) {
+      console.log(
+        `Пользователь ${ctx.from.id} находится в сцене ${ctx.session.__scenes.current}, пропускаем рестарт`
+      );
+      return next();
+    }
+
+    // Если это не callback и не команда /start, проверяем время последнего запуска
+    if (!ctx.callbackQuery && (!ctx.message || ctx.message.text !== "/start")) {
+      // Проверка: сообщение пришло после перезапуска бота
+      if (
+        !ctx.session ||
+        !ctx.session.lastInteraction ||
+        ctx.session.lastInteraction < BOT_START_TIME
+      ) {
+        console.log(`Автоматический рестарт для пользователя ${ctx.from.id}`);
+
+        // Очищаем сессию, но сохраняем любые сценарии
+        const oldScenes =
+          ctx.session && ctx.session.__scenes ? ctx.session.__scenes : null;
+        ctx.session = { lastInteraction: Date.now() };
+
+        // Если был активный сценарий, восстанавливаем его
+        if (oldScenes) {
+          ctx.session.__scenes = oldScenes;
+        }
+
+        // Проверяем, зарегистрирован ли пользователь
+        const userDoc = await db
+          .collection("users")
+          .doc(String(ctx.from.id))
+          .get();
+
+        if (userDoc.exists) {
+          // Если пользователь уже зарегистрирован, показываем главное меню
+          await ctx.reply("Бот был обновлен. Вот главное меню:", {
+            reply_markup: getMainMenuKeyboard(),
+          });
+        } else {
+          // Если пользователь не зарегистрирован и не в сцене регистрации
+          if (!oldScenes || oldScenes.current !== "register") {
+            await ctx.reply(
+              "Привет! DogMeet помогает находить компанию для прогулок с собакой 🐶.\n" +
+                "🔹 Находите владельцев собак рядом.\n" +
+                "🔹 Создавайте прогулки в один клик.\n" +
+                "🔹 Присоединяйтесь к другим участникам.",
+              Markup.inlineKeyboard([
+                [Markup.button.callback("Создать профиль", "create_profile")],
+              ])
+            );
+          }
+        }
+
+        // Если мы не в сцене, прерываем обработку текущего сообщения
+        if (!oldScenes) {
+          return;
+        }
+      }
+    }
+
+    // Обновляем время последнего взаимодействия в сессии
+    if (!ctx.session) ctx.session = {};
+    ctx.session.lastInteraction = Date.now();
+
+    return next();
+  } catch (error) {
+    console.error("Ошибка в middleware автоматического рестарта:", error);
+    // В случае ошибки продолжаем выполнение без автоматического рестарта
+    return next();
+  }
+});
+
 // Константы для размеров и возраста собак
 const DOG_SIZES = {
   SMALL: { text: "Маленькая 🐾 (до 10 кг)", value: "small" },
@@ -78,6 +154,12 @@ const registerScene = new Scenes.WizardScene(
     }
 
     if (ctx.message && ctx.message.text) {
+      if (!isValidString(ctx.message.text)) {
+        ctx.reply(
+          "Имя не может быть пустым или 'null'. Пожалуйста, введите корректное имя:"
+        );
+        return; // Остаемся на этом же шаге
+      }
       ctx.wizard.state.userData.name = ctx.message.text;
     }
 
@@ -123,6 +205,10 @@ const registerScene = new Scenes.WizardScene(
   // Шаг 4: Порода собаки
   (ctx) => {
     if (ctx.message && ctx.message.text) {
+      if (!isValidString(ctx.message.text)) {
+        ctx.reply("Пожалуйста, введите корректную породу:");
+        return; // Остаемся на этом же шаге
+      }
       ctx.wizard.state.userData.dogName = ctx.message.text;
     }
 
@@ -158,6 +244,10 @@ const registerScene = new Scenes.WizardScene(
       ctx.message &&
       ctx.message.text
     ) {
+      if (!isValidString(ctx.message.text)) {
+        ctx.reply("Пожалуйста, введите корректную породу:");
+        return; // Остаемся на этом же шаге
+      }
       ctx.wizard.state.userData.dogBreed = ctx.message.text;
       ctx.wizard.state.waitingForCustomBreed = false;
     }
@@ -258,11 +348,11 @@ const registerScene = new Scenes.WizardScene(
     );
     return ctx.wizard.next();
   },
-
+  // Шаг 8: Завершение регистрации
   // Шаг 8: Завершение регистрации
   async (ctx) => {
     try {
-      const userData = ctx.wizard.state.userData;
+      const userData = ctx.wizard.state.userData || {};
 
       // Обработка callback для пропуска фото
       if (ctx.callbackQuery && ctx.callbackQuery.data === "skip_photo") {
@@ -274,30 +364,18 @@ const registerScene = new Scenes.WizardScene(
         userData.dogPhotoId = photoId;
       }
 
-      // Проверка наличия всех необходимых данных
-      if (
-        !userData.name ||
-        !userData.city ||
-        !userData.dogName ||
-        !userData.dogBreed ||
-        !userData.dogSize ||
-        !userData.dogAge
-      ) {
-        console.error(
-          "Отсутствуют необходимые данные для регистрации:",
-          userData
-        );
-        await ctx.reply(
-          "Произошла ошибка при регистрации. Пожалуйста, начните снова.",
-          Markup.removeKeyboard()
-        );
-        return ctx.scene.reenter();
-      }
+      // Устанавливаем дефолтные значения для всех отсутствующих полей
+      userData.name = userData.name || "Не указано";
+      userData.city = userData.city || "Не указан";
+      userData.dogName = userData.dogName || "Не указано";
+      userData.dogBreed = userData.dogBreed || "Не указана";
+      userData.dogSize = userData.dogSize || "Не указана";
+      userData.dogAge = userData.dogAge || "Не указана";
 
       // Сохраняем данные пользователя в базу данных
       const user = {
         id: ctx.from.id,
-        username: ctx.from.username || null, // Добавить проверку на undefined
+        username: ctx.from.username || null,
         name: userData.name,
         city: userData.city,
         location: userData.location || null,
@@ -385,6 +463,10 @@ const createWalkScene = new Scenes.WizardScene(
     }
     // Обработка ввода произвольной даты
     else if (ctx.message && ctx.message.text) {
+      if (!isValidDate(ctx.message.text)) {
+        ctx.reply("Пожалуйста, введите корректную дату в формате ДД.ММ.ГГГГ:");
+        return; // Остаемся на этом шаге
+      }
       ctx.wizard.state.walkData.date = ctx.message.text;
     }
 
@@ -461,6 +543,44 @@ const createWalkScene = new Scenes.WizardScene(
             .concat([[{ text: "❌ Отмена", callback_data: "cancel" }]])
         )
       );
+    } else if (ctx.message && ctx.message.text) {
+      if (ctx.message.text === "❌ Отмена") {
+        ctx.reply("Создание прогулки отменено", {
+          reply_markup: getMainMenuKeyboard(),
+        });
+        return ctx.scene.leave();
+      }
+
+      // Проверка, что введено число от 0 до 23
+      const hours = parseInt(ctx.message.text, 10);
+      if (isNaN(hours) || hours < 0 || hours > 23) {
+        ctx.reply("Пожалуйста, введите корректное значение часов (0-23):");
+        return; // Остаемся на том же шаге
+      }
+
+      ctx.wizard.state.walkData.hours = String(hours);
+
+      ctx.reply(
+        `Выбрано: ${hours} ч.\nВыберите минуты:`,
+        Markup.inlineKeyboard(
+          [
+            "00",
+            "05",
+            "10",
+            "15",
+            "20",
+            "25",
+            "30",
+            "35",
+            "40",
+            "45",
+            "50",
+            "55",
+          ]
+            .map((m) => [{ text: m, callback_data: `minute_${m}` }])
+            .concat([[{ text: "❌ Отмена", callback_data: "cancel" }]])
+        )
+      );
     }
 
     return ctx.wizard.next();
@@ -494,6 +614,42 @@ const createWalkScene = new Scenes.WizardScene(
         ])
       );
     }
+
+    // Обработка текстового ввода минут
+    else if (
+      ctx.message &&
+      ctx.message.text &&
+      !ctx.wizard.state.waitingForLocationText &&
+      !ctx.message.location
+    ) {
+      if (ctx.message.text === "❌ Отмена") {
+        ctx.reply("Создание прогулки отменено", {
+          reply_markup: getMainMenuKeyboard(),
+        });
+        return ctx.scene.leave();
+      }
+
+      // Проверка, что введено число от 0 до 59
+      const minutes = parseInt(ctx.message.text, 10);
+      if (isNaN(minutes) || minutes < 0 || minutes > 59) {
+        ctx.reply("Пожалуйста, введите корректное значение минут (0-59):");
+        return; // Остаемся на том же шаге
+      }
+
+      // Форматировать минуты с ведущим нулем
+      const formattedMinutes = minutes < 10 ? `0${minutes}` : `${minutes}`;
+      ctx.wizard.state.walkData.minutes = formattedMinutes;
+      ctx.wizard.state.walkData.time = `${ctx.wizard.state.walkData.hours}:${formattedMinutes}`;
+
+      ctx.reply(
+        `Время прогулки: ${ctx.wizard.state.walkData.time}\nГде встречаемся?`,
+        Markup.inlineKeyboard([
+          [{ text: "Отправить геолокацию 📍", callback_data: "send_location" }],
+          [{ text: "Ввести текстом", callback_data: "enter_location_text" }],
+          [{ text: "❌ Отмена", callback_data: "cancel" }],
+        ])
+      );
+    }
     // Обработка выбора типа ввода места
     else if (ctx.callbackQuery) {
       ctx.answerCbQuery();
@@ -510,6 +666,12 @@ const createWalkScene = new Scenes.WizardScene(
     // Обработка ввода текста места или геолокации
     else if (ctx.message) {
       if (ctx.wizard.state.waitingForLocationText) {
+        if (!isValidString(ctx.message.text)) {
+          ctx.reply(
+            "Описание места встречи не может быть пустым или 'null'. Пожалуйста, введите корректное описание:"
+          );
+          return;
+        }
         ctx.wizard.state.walkData.locationText = ctx.message.text;
         ctx.wizard.state.waitingForLocationText = false;
       } else if (ctx.message.location) {
@@ -714,6 +876,7 @@ editProfileMenuScene.enter(async (ctx) => {
 });
 
 // Сцена редактирования имени
+// Сцена редактирования имени
 const editNameScene = new Scenes.WizardScene(
   "editName",
   // Шаг 1: Ввод нового имени
@@ -723,14 +886,31 @@ const editNameScene = new Scenes.WizardScene(
   },
   // Шаг 2: Сохранение нового имени
   async (ctx) => {
-    const newName = ctx.message.text;
+    try {
+      if (!ctx.message || !ctx.message.text) {
+        await ctx.reply("Пожалуйста, введите корректное имя:");
+        return; // Остаемся на том же шаге
+      }
 
-    await db.collection("users").doc(String(ctx.from.id)).update({
-      name: newName,
-    });
+      const newName = ctx.message.text;
 
-    await ctx.reply("✅ Имя успешно изменено!");
-    return ctx.scene.enter("editProfileMenu");
+      // Проверяем валидность имени прямо здесь
+      if (!isValidString(newName)) {
+        await ctx.reply("Пожалуйста, введите корректное имя:");
+        return; // Остаемся на том же шаге для повторного ввода
+      }
+
+      await db.collection("users").doc(String(ctx.from.id)).update({
+        name: newName,
+      });
+
+      await ctx.reply("✅ Имя успешно изменено!");
+      return ctx.scene.enter("editProfileMenu");
+    } catch (error) {
+      console.error("Ошибка при обновлении имени:", error);
+      await ctx.reply("Произошла ошибка. Попробуйте еще раз.");
+      return ctx.scene.enter("editProfileMenu");
+    }
   }
 );
 
@@ -761,6 +941,11 @@ const editCityScene = new Scenes.WizardScene(
 
         if (data === "cancel_edit") {
           await ctx.reply("Редактирование отменено");
+
+          if (!isValidString(ctx.message.text)) {
+            await ctx.reply("Пожалуйста, введите корректное название:");
+            return;
+          }
           return ctx.scene.enter("editProfileMenu");
         } else if (data === "send_location") {
           await ctx.reply("Отправьте геолокацию:", Markup.removeKeyboard());
@@ -823,18 +1008,27 @@ const editDogNameScene = new Scenes.WizardScene(
   // Шаг 2: Сохранение имени собаки
   async (ctx) => {
     try {
-      if (ctx.message && ctx.message.text) {
-        const newDogName = ctx.message.text;
-
-        await db.collection("users").doc(String(ctx.from.id)).update({
-          "dog.name": newDogName,
-        });
-
-        await ctx.reply("✅ Имя собаки успешно изменено!");
-        return ctx.scene.enter("editProfileMenu");
-      } else {
-        await ctx.reply("Пожалуйста, введите текст для имени собаки.");
+      if (!ctx.message || !ctx.message.text) {
+        await ctx.reply("Пожалуйста, введите имя собаки текстом.");
+        return; // Остаемся на том же шаге
       }
+
+      const newDogName = ctx.message.text;
+
+      // Проверяем валидность имени собаки
+      if (!isValidString(newDogName)) {
+        await ctx.reply(
+          "Имя собаки не может быть пустым или 'null'. Пожалуйста, введите корректное имя:"
+        );
+        return; // Остаемся на том же шаге для повторного ввода
+      }
+
+      await db.collection("users").doc(String(ctx.from.id)).update({
+        "dog.name": newDogName,
+      });
+
+      await ctx.reply("✅ Имя собаки успешно изменено!");
+      return ctx.scene.enter("editProfileMenu");
     } catch (error) {
       console.error("Ошибка при редактировании имени собаки:", error);
       await ctx.reply("Произошла ошибка. Попробуйте снова.");
@@ -1258,6 +1452,12 @@ const editWalkDateTimeScene = new Scenes.WizardScene(
       // Обработка текстового ввода даты
       else if (ctx.message && ctx.message.text) {
         if (ctx.wizard.state.customDate) {
+          if (!isValidDate(ctx.message.text)) {
+            ctx.reply(
+              "Пожалуйста, введите корректную дату в формате ДД.ММ.ГГГГ:"
+            );
+            return; // Остаемся на этом шаге
+          }
           ctx.wizard.state.walkData.date = ctx.message.text;
           ctx.wizard.state.customDate = false;
         }
@@ -1611,6 +1811,12 @@ const editWalkLocationScene = new Scenes.WizardScene(
         ctx.message.text &&
         ctx.wizard.state.waitingForLocationText
       ) {
+        if (!isValidString(ctx.message.text)) {
+          await ctx.reply(
+            "Описание места встречи не может быть пустым или 'null'. Пожалуйста, введите корректное описание:"
+          );
+          return;
+        }
         const newLocation = ctx.message.text;
 
         // Получаем текущую информацию о прогулке для уведомления участников
@@ -1926,8 +2132,6 @@ function getWalkFiltersKeyboard() {
   };
 }
 
-// Добавьте эти обработчики перед bot.launch()
-
 // Обработчики для главного меню
 bot.action("find_walk", async (ctx) => {
   await ctx.answerCbQuery();
@@ -2020,8 +2224,26 @@ bot.action("my_participations", async (ctx) => {
 });
 
 bot.action("my_profile", async (ctx) => {
-  await ctx.answerCbQuery();
-  await showProfile(ctx);
+  // Сразу отвечаем на callback, прежде чем делать какие-либо операции с БД
+  try {
+    await ctx.answerCbQuery();
+  } catch (error) {
+    console.log("Не удалось ответить на callback запрос:", error.message);
+    // Продолжаем выполнение обработчика, даже если answerCbQuery не удался
+  }
+
+  // Затем выполняем остальные операции
+  try {
+    await showProfile(ctx);
+  } catch (error) {
+    console.error("Ошибка при показе профиля:", error);
+    await ctx.reply(
+      "Произошла ошибка при загрузке профиля. Попробуйте еще раз.",
+      {
+        reply_markup: getMainMenuKeyboard(),
+      }
+    );
+  }
 });
 
 bot.action("back_to_main_menu", async (ctx) => {
@@ -2156,44 +2378,57 @@ bot.action("walks_all_dates", async (ctx) => {
 
 // Модифицированная функция showProfile
 async function showProfile(ctx) {
-  const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
+  try {
+    const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
 
-  if (!userDoc.exists) {
-    ctx.reply("Ваш профиль не найден. Пожалуйста, пройдите регистрацию.");
-    return;
-  }
-
-  const userData = userDoc.data();
-
-  const profileText = `
-    👤 Имя: ${userData.name} ${ctx.from.username ? "@" + ctx.from.username : ""}
-    📍 Город: ${userData.city}
-    🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
-    `;
-
-  // Сначала отправляем информацию о профиле
-  if (userData.dog.photoId) {
-    await ctx.replyWithPhoto(userData.dog.photoId, {
-      caption: profileText,
-    });
-  } else {
-    await ctx.reply(profileText);
-  }
-
-  // Отправляем кнопки
-  await ctx.reply("Выберите действие:", {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: "✏️ Редактировать профиль",
-            callback_data: "edit_profile_menu",
+    if (!userDoc.exists) {
+      return await ctx.reply(
+        "Ваш профиль не найден. Пожалуйста, пройдите регистрацию.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Создать профиль", callback_data: "create_profile" }],
+            ],
           },
+        }
+      );
+    }
+
+    const userData = userDoc.data();
+
+    const profileText = `
+        👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
+        📍 Город: ${userData.city}
+        🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+        `;
+
+    // Сначала отправляем информацию о профиле
+    if (userData.dog && userData.dog.photoId) {
+      await ctx.replyWithPhoto(userData.dog.photoId, {
+        caption: profileText,
+      });
+    } else {
+      await ctx.reply(profileText);
+    }
+
+    // Отправляем кнопки
+    await ctx.reply("Выберите действие:", {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "✏️ Редактировать профиль",
+              callback_data: "edit_profile_menu",
+            },
+          ],
+          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
         ],
-        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
-      ],
-    },
-  });
+      },
+    });
+  } catch (error) {
+    console.error("Ошибка при отображении профиля:", error);
+    throw error; // Передаем ошибку дальше для обработки в вызывающей функции
+  }
 }
 
 // Функция отображения списка прогулок
@@ -2218,12 +2453,45 @@ async function showWalksList(ctx, walkDocs) {
   }
 }
 
+// Функция для проверки валидности строковых данных
+function isValidString(str) {
+  // Проверяем, что строка не пустая, не "null", "undefined", и т.д.
+  return (
+    str &&
+    typeof str === "string" &&
+    str.trim() !== "" &&
+    str.toLowerCase() !== "null" &&
+    str.toLowerCase() !== "undefined"
+  );
+}
+
+function isValidDate(dateStr) {
+  // Проверка формата ДД.ММ.ГГГГ
+  const dateRegex = /^\d{2}\.\d{2}\.\d{4}$/;
+  if (!dateRegex.test(dateStr)) {
+    return false;
+  }
+
+  // Дополнительная проверка валидности даты
+  const [day, month, year] = dateStr.split(".").map(Number);
+  const date = new Date(year, month - 1, day);
+
+  return (
+    date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+  );
+}
+
 async function notifyWalkParticipants(participants, message) {
   if (!participants || participants.length === 0) return;
 
   for (const participant of participants) {
     try {
-      await bot.telegram.sendMessage(participant.id, message);
+      // Добавляем главное меню к каждому уведомлению
+      await bot.telegram.sendMessage(participant.id, message, {
+        reply_markup: getMainMenuKeyboard(),
+      });
     } catch (error) {
       console.error(
         `Ошибка при отправке уведомления участнику ${participant.id}:`,
@@ -2401,7 +2669,8 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
   👤 ${userData.name}
   🐕 ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
   📩 Контакт: ${ctx.from.username ? "@" + ctx.from.username : "Нет username"}
-  `
+  `,
+        { reply_markup: getMainMenuKeyboard() }
       );
 
       // Если у собаки участника есть фото, отправляем его организатору
@@ -2458,7 +2727,8 @@ bot.action(/leave_walk_(.+)/, async (ctx) => {
     try {
       await bot.telegram.sendMessage(
         walk.organizer.id,
-        `Участник ${ctx.from.username ? "@" + ctx.from.username : ctx.from.id} покинул вашу прогулку.`
+        `Участник ${ctx.from.username ? "@" + ctx.from.username : ctx.from.id} покинул вашу прогулку.`,
+        { reply_markup: getMainMenuKeyboard() }
       );
     } catch (error) {
       console.error("Ошибка при отправке уведомления организатору:", error);
@@ -2559,7 +2829,8 @@ bot.action(/contact_organizer_(.+)/, async (ctx) => {
       try {
         await bot.telegram.sendMessage(
           walk.organizer.id,
-          `Участник ${ctx.from.username ? "@" + ctx.from.username : ctx.from.id} хочет связаться с вами по поводу прогулки ${walk.date}, ${walk.time}.`
+          `Участник ${ctx.from.username ? "@" + ctx.from.username : ctx.from.id} хочет связаться с вами по поводу прогулки ${walk.date}, ${walk.time}.`,
+          { reply_markup: getMainMenuKeyboard() }
         );
       } catch (error) {
         console.error("Ошибка при отправке сообщения организатору:", error);
@@ -2649,7 +2920,8 @@ async function notifyNearbyUsers(walkId, organizer, walkData) {
 `,
       Markup.inlineKeyboard([
         [Markup.button.callback("Подробнее", `walk_details_${walkId}`)],
-      ])
+      ]),
+      { reply_markup: getMainMenuKeyboard() }
     );
   }
 }
@@ -2703,11 +2975,14 @@ async function remindAboutWalks() {
   `;
 
         // Уведомляем организатора
-        await bot.telegram.sendMessage(walk.organizer.id, reminderText);
-
+        await bot.telegram.sendMessage(walk.organizer.id, reminderText, {
+          reply_markup: getMainMenuKeyboard(),
+        });
         // Уведомляем всех участников
         for (const participant of walk.participants) {
-          await bot.telegram.sendMessage(participant.id, reminderText);
+          await bot.telegram.sendMessage(participant.id, reminderText, {
+            reply_markup: getMainMenuKeyboard(),
+          });
         }
       }
     }
@@ -3499,6 +3774,7 @@ bot.action(/minute_(\d+)/, async (ctx) => {
 bot
   .launch()
   .then(() => {
+    BOT_START_TIME = Date.now(); // Обновляем время запуска
     console.log("Бот DogMeet успешно запущен!");
   })
   .catch((err) => {
