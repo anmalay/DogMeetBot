@@ -3,6 +3,8 @@ const { Telegraf, Scenes, session, Markup } = require("telegraf");
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
 const moment = require("moment");
+const fetch = require("node-fetch");
+
 const cron = require("node-cron");
 require("dotenv").config();
 
@@ -141,67 +143,124 @@ const POPULAR_CITIES = [
 // Сцена регистрации пользователя
 const registerScene = new Scenes.WizardScene(
   "register",
-  // Шаг 1: Ввод имени
+  // Шаг 1: Теперь сразу берем имя из профиля и переходим к выбору города
   (ctx) => {
-    ctx.reply("Как вас зовут?");
-    return ctx.wizard.next();
-  },
+    // Инициализируем объект с данными пользователя
+    ctx.wizard.state.userData = {};
 
-  // Шаг 2: Ввод имени и выбор города
-  (ctx) => {
-    if (!ctx.wizard.state.userData) {
-      ctx.wizard.state.userData = {};
-    }
+    // Получаем имя из профиля Telegram
+    const firstName = ctx.from.first_name || "";
+    const lastName = ctx.from.last_name || "";
 
-    if (ctx.message && ctx.message.text) {
-      if (!isValidString(ctx.message.text)) {
-        ctx.reply(
-          "Имя не может быть пустым или 'null'. Пожалуйста, введите корректное имя:"
-        );
-        return; // Остаемся на этом же шаге
-      }
-      ctx.wizard.state.userData.name = ctx.message.text;
-    }
+    // Сохраняем полное имя (или только имя, если фамилии нет)
+    ctx.wizard.state.userData.name =
+      firstName + (lastName ? " " + lastName : "");
 
+    // Улучшенный текст с объяснением преимуществ геолокации
     ctx.reply(
-      "Выберите город или отправьте геолокацию 📍",
-      Markup.inlineKeyboard([
-        ...POPULAR_CITIES.map((city) => [
-          { text: city, callback_data: `city_${city}` },
-        ]),
-        [{ text: "Отправить геолокацию 📍", callback_data: "send_location" }],
-      ])
+      `Привет, ${ctx.wizard.state.userData.name}! 🐾\n\nЧтобы находить прогулки рядом с вами, мне нужно узнать, где вы находитесь.`
+    );
+
+    // Второе сообщение - объяснение и кнопки
+    ctx.reply(
+      `💡 <b>Совет</b>: Отправка геолокации позволит:\n• Получать уведомления о прогулках поблизости\n• Использовать фильтр "Прогулки рядом"\n• Находить собачьих друзей в вашем районе`,
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            // Кнопки с городами
+            ...POPULAR_CITIES.map((city) => [
+              { text: city, callback_data: `city_${city}` },
+            ]),
+            // Кнопка геолокации
+            [
+              {
+                text: "📍 Отправить геолокацию (рекомендуется)",
+                callback_data: "send_location_reg",
+              },
+            ],
+          ],
+        },
+      }
     );
     return ctx.wizard.next();
   },
 
-  // Шаг 3: Обработка города и имени собаки
+  // Шаг 2: Обработка города (теперь это первый шаг для пользователя)
   (ctx) => {
-    // Обработка callback
-    if (ctx.callbackQuery) {
-      const data = ctx.callbackQuery.data;
-      ctx.answerCbQuery();
+    try {
+      // Обработка callback
+      if (ctx.callbackQuery) {
+        const data = ctx.callbackQuery.data;
+        ctx.answerCbQuery();
 
-      if (data.startsWith("city_")) {
-        ctx.wizard.state.userData.city = data.replace("city_", "");
-      } else if (data === "send_location") {
-        ctx.reply("Отправьте геолокацию:", Markup.removeKeyboard());
-        return; // Ожидаем следующее сообщение с геолокацией
+        if (data.startsWith("city_")) {
+          ctx.wizard.state.userData.city = data.replace("city_", "");
+        } else if (data === "send_location_reg") {
+          // Показываем физическую клавиатуру с кнопкой геолокации
+          ctx.reply(
+            "Нажмите кнопку, чтобы отправить вашу геолокацию:",
+            Markup.keyboard([
+              [Markup.button.locationRequest("📍 Отправить мою геолокацию")],
+            ]).resize()
+          );
+          ctx.wizard.state.waitingForLocationReg = true;
+          return; // Ожидаем следующее сообщение с геолокацией
+        }
       }
-    }
-    // Обработка геолокации
-    else if (ctx.message && ctx.message.location) {
-      ctx.wizard.state.userData.location = {
-        latitude: ctx.message.location.latitude,
-        longitude: ctx.message.location.longitude,
-      };
-      ctx.wizard.state.userData.city = "Определен по геолокации";
-    }
+      // Обработка геолокации
+      else if (ctx.message && ctx.message.location) {
+        console.log("Получены координаты:", ctx.message.location);
 
-    ctx.reply("Как зовут вашу собаку?", Markup.removeKeyboard());
-    return ctx.wizard.next();
+        // Сохраняем координаты
+        ctx.wizard.state.userData.location = {
+          latitude: ctx.message.location.latitude,
+          longitude: ctx.message.location.longitude,
+        };
+
+        // Получаем название города из координат
+        getLocationCity(
+          ctx.message.location.latitude,
+          ctx.message.location.longitude
+        )
+          .then((cityName) => {
+            // Если город определен - используем его, если нет - используем общую фразу
+            ctx.wizard.state.userData.city =
+              cityName || "Определен по геолокации";
+            console.log(`Определен город: ${ctx.wizard.state.userData.city}`);
+          })
+          .catch((error) => {
+            console.error("Ошибка при определении города:", error);
+            ctx.wizard.state.userData.city = "Определен по геолокации";
+          })
+          .finally(() => {
+            // Убираем физическую клавиатуру геолокации
+            ctx.reply(
+              "🎉 Отлично! Теперь вы будете получать уведомления о прогулках рядом с вами.",
+              Markup.removeKeyboard()
+            );
+
+            // Переходим к следующему шагу (имя собаки)
+            ctx.reply("Как зовут вашу собаку?");
+            ctx.wizard.next();
+          });
+
+        return; // Ждем завершения асинхронного определения города
+      }
+
+      // Продолжаем регистрацию
+      ctx.reply("Как зовут вашу собаку?", Markup.removeKeyboard());
+      return ctx.wizard.next();
+    } catch (error) {
+      console.error("Ошибка при обработке города/геолокации:", error);
+      ctx.reply(
+        "Произошла ошибка. Пожалуйста, выберите город из списка.",
+        Markup.removeKeyboard()
+      );
+      // Не переходим дальше, оставаясь на этом шаге
+      return;
+    }
   },
-
   // Шаг 4: Порода собаки
   (ctx) => {
     if (ctx.message && ctx.message.text) {
@@ -605,16 +664,21 @@ const createWalkScene = new Scenes.WizardScene(
       ctx.wizard.state.walkData.minutes = minute;
       ctx.wizard.state.walkData.time = `${ctx.wizard.state.walkData.hours}:${minute}`;
 
+      // Улучшенные опции для выбора места
       ctx.reply(
         `Время прогулки: ${ctx.wizard.state.walkData.time}\nГде встречаемся?`,
         Markup.inlineKeyboard([
-          [{ text: "Отправить геолокацию 📍", callback_data: "send_location" }],
-          [{ text: "Ввести текстом", callback_data: "enter_location_text" }],
+          [
+            {
+              text: "🟢 Гуляю здесь (текущее место)",
+              callback_data: "walk_here",
+            },
+          ],
+          [{ text: "✏️ Ввести адрес", callback_data: "enter_location_text" }],
           [{ text: "❌ Отмена", callback_data: "cancel" }],
         ])
       );
     }
-
     // Обработка текстового ввода минут
     else if (
       ctx.message &&
@@ -644,8 +708,13 @@ const createWalkScene = new Scenes.WizardScene(
       ctx.reply(
         `Время прогулки: ${ctx.wizard.state.walkData.time}\nГде встречаемся?`,
         Markup.inlineKeyboard([
-          [{ text: "Отправить геолокацию 📍", callback_data: "send_location" }],
-          [{ text: "Ввести текстом", callback_data: "enter_location_text" }],
+          [
+            {
+              text: "🟢 Гуляю здесь (текущее место)",
+              callback_data: "walk_here",
+            },
+          ],
+          [{ text: "✏️ Ввести адрес", callback_data: "enter_location_text" }],
           [{ text: "❌ Отмена", callback_data: "cancel" }],
         ])
       );
@@ -654,8 +723,15 @@ const createWalkScene = new Scenes.WizardScene(
     else if (ctx.callbackQuery) {
       ctx.answerCbQuery();
 
-      if (ctx.callbackQuery.data === "send_location") {
-        ctx.reply("Отправьте геолокацию:", Markup.removeKeyboard());
+      if (ctx.callbackQuery.data === "walk_here") {
+        // Для опции "Гуляю здесь" - запрашиваем текущее местоположение
+        ctx.reply(
+          "Отправьте ваше текущее местоположение:",
+          Markup.keyboard([
+            [Markup.button.locationRequest("📍 Отправить моё местоположение")],
+          ]).resize()
+        );
+        ctx.wizard.state.waitingForWalkHere = true;
         return;
       } else if (ctx.callbackQuery.data === "enter_location_text") {
         ctx.reply("Опишите место встречи:", Markup.removeKeyboard());
@@ -679,8 +755,22 @@ const createWalkScene = new Scenes.WizardScene(
           latitude: ctx.message.location.latitude,
           longitude: ctx.message.location.longitude,
         };
+
+        // Если это была опция "Гуляю здесь", добавляем соответствующую метку
+        if (ctx.wizard.state.waitingForWalkHere) {
+          ctx.wizard.state.walkData.locationDescription =
+            "Текущее местоположение";
+          ctx.wizard.state.waitingForWalkHere = false;
+        }
+
+        // Если это была опция "Выбрать на карте", можно добавить другую метку
+        if (ctx.wizard.state.waitingForMapLocation) {
+          ctx.wizard.state.walkData.locationDescription = "Выбрано на карте";
+          ctx.wizard.state.waitingForMapLocation = false;
+        }
       }
 
+      // Убираем клавиатуру
       ctx.reply(
         "Это разовая или регулярная прогулка?",
         Markup.inlineKeyboard([
@@ -925,7 +1015,18 @@ const editCityScene = new Scenes.WizardScene(
         ...POPULAR_CITIES.map((city) => [
           { text: city, callback_data: `city_${city}` },
         ]),
-        [{ text: "Отправить геолокацию 📍", callback_data: "send_location" }],
+        [
+          {
+            text: "📍 Моё текущее местоположение",
+            callback_data: "current_location",
+          },
+        ],
+        [
+          {
+            text: "📌 Выбрать место на карте",
+            callback_data: "choose_map_location",
+          },
+        ],
         [{ text: "↩️ Отмена", callback_data: "cancel_edit" }],
       ])
     );
@@ -941,27 +1042,58 @@ const editCityScene = new Scenes.WizardScene(
 
         if (data === "cancel_edit") {
           await ctx.reply("Редактирование отменено");
-
-          if (!isValidString(ctx.message.text)) {
-            await ctx.reply("Пожалуйста, введите корректное название:");
-            return;
-          }
           return ctx.scene.enter("editProfileMenu");
-        } else if (data === "send_location") {
-          await ctx.reply("Отправьте геолокацию:", Markup.removeKeyboard());
+        } else if (data === "current_location") {
+          // Показываем кнопку для отправки текущего местоположения
+          await ctx.reply(
+            "Нажмите кнопку, чтобы отправить ваше текущее местоположение:",
+            Markup.keyboard([
+              [
+                Markup.button.locationRequest(
+                  "📍 Отправить моё местоположение"
+                ),
+              ],
+            ]).resize()
+          );
+          ctx.wizard.state.waitingForCurrentLocation = true;
+          return;
+        } else if (data === "choose_map_location") {
+          // Показываем кнопку для выбора места на карте
+          await ctx.reply(
+            "Выберите место на карте и отправьте:",
+            Markup.keyboard([
+              [Markup.button.locationRequest("📍 Выбрать место на карте")],
+            ]).resize()
+          );
+          ctx.wizard.state.waitingForMapLocation = true;
           return;
         } else if (data.startsWith("city_")) {
           const city = data.replace("city_", "");
           await db.collection("users").doc(String(ctx.from.id)).update({
             city: city,
+            // Очищаем геоданные, так как выбран конкретный город
+            location: null,
           });
 
-          await ctx.reply("✅ Город успешно изменен!");
+          await ctx.reply("✅ Город успешно изменен!", {
+            reply_markup: { remove_keyboard: true },
+          });
           return ctx.scene.enter("editProfileMenu");
         }
       }
       // Обработка геолокации
       else if (ctx.message && ctx.message.location) {
+        let locationDescription = "Геолокация";
+
+        // Определяем тип местоположения
+        if (ctx.wizard.state.waitingForCurrentLocation) {
+          locationDescription = "Текущее местоположение";
+          ctx.wizard.state.waitingForCurrentLocation = false;
+        } else if (ctx.wizard.state.waitingForMapLocation) {
+          locationDescription = "Выбрано на карте";
+          ctx.wizard.state.waitingForMapLocation = false;
+        }
+
         await db
           .collection("users")
           .doc(String(ctx.from.id))
@@ -969,30 +1101,41 @@ const editCityScene = new Scenes.WizardScene(
             location: {
               latitude: ctx.message.location.latitude,
               longitude: ctx.message.location.longitude,
+              description: locationDescription,
             },
             city: "Определен по геолокации",
           });
 
-        await ctx.reply("✅ Геолокация успешно сохранена!");
+        await ctx.reply("✅ Местоположение успешно сохранено!", {
+          reply_markup: { remove_keyboard: true },
+        });
         return ctx.scene.enter("editProfileMenu");
       }
       // Обработка текстового ввода города
       else if (ctx.message && ctx.message.text) {
         if (ctx.message.text === "↩️ Отмена") {
-          await ctx.reply("Редактирование отменено");
+          await ctx.reply("Редактирование отменено", {
+            reply_markup: { remove_keyboard: true },
+          });
           return ctx.scene.enter("editProfileMenu");
         }
 
         await db.collection("users").doc(String(ctx.from.id)).update({
           city: ctx.message.text,
+          // Очищаем геоданные, так как введен текстовый город
+          location: null,
         });
 
-        await ctx.reply("✅ Город успешно изменен!");
+        await ctx.reply("✅ Город успешно изменен!", {
+          reply_markup: { remove_keyboard: true },
+        });
         return ctx.scene.enter("editProfileMenu");
       }
     } catch (error) {
       console.error("Ошибка при редактировании города:", error);
-      await ctx.reply("Произошла ошибка. Попробуйте снова.");
+      await ctx.reply("Произошла ошибка. Попробуйте снова.", {
+        reply_markup: { remove_keyboard: true },
+      });
       return ctx.scene.enter("editProfileMenu");
     }
   }
@@ -1693,6 +1836,7 @@ const editWalkDateTimeScene = new Scenes.WizardScene(
   }
 );
 // Сцена редактирования места прогулки
+// Сцена редактирования места прогулки
 const editWalkLocationScene = new Scenes.WizardScene(
   "editWalkLocation",
   // Шаг 1: Выбор типа места
@@ -1718,8 +1862,14 @@ const editWalkLocationScene = new Scenes.WizardScene(
       ctx.reply(
         "Укажите новое место встречи:",
         Markup.inlineKeyboard([
-          [{ text: "Отправить геолокацию 📍", callback_data: "send_location" }],
-          [{ text: "Ввести текстом", callback_data: "enter_location_text" }],
+          [
+            {
+              text: "🟢 Мое текущее местоположение",
+              callback_data: "current_location_walk",
+            },
+          ],
+          [{ text: "📍 Выбрать на карте", callback_data: "choose_map_walk" }],
+          [{ text: "✏️ Ввести текстом", callback_data: "enter_location_text" }],
           [{ text: "❌ Отмена", callback_data: "cancel" }],
         ])
       );
@@ -1749,9 +1899,29 @@ const editWalkLocationScene = new Scenes.WizardScene(
             reply_markup: getMainMenuKeyboard(),
           });
           return ctx.scene.leave();
-        } else if (data === "send_location") {
-          await ctx.reply("Отправьте геолокацию:", Markup.removeKeyboard());
-          ctx.wizard.state.waitingForLocation = true;
+        } else if (data === "current_location_walk") {
+          // Показываем кнопку для отправки текущего местоположения
+          await ctx.reply(
+            "Нажмите кнопку, чтобы отправить ваше текущее местоположение:",
+            Markup.keyboard([
+              [
+                Markup.button.locationRequest(
+                  "📍 Отправить моё местоположение"
+                ),
+              ],
+            ]).resize()
+          );
+          ctx.wizard.state.waitingForCurrentLocation = true;
+          return;
+        } else if (data === "choose_map_walk") {
+          // Показываем кнопку для выбора на карте
+          await ctx.reply(
+            "Выберите место встречи на карте и отправьте:",
+            Markup.keyboard([
+              [Markup.button.locationRequest("📍 Выбрать место на карте")],
+            ]).resize()
+          );
+          ctx.wizard.state.waitingForMapLocation = true;
           return;
         } else if (data === "enter_location_text") {
           await ctx.reply("Опишите место встречи:", Markup.removeKeyboard());
@@ -1761,11 +1931,7 @@ const editWalkLocationScene = new Scenes.WizardScene(
       }
 
       // Обработка геолокации
-      else if (
-        ctx.message &&
-        ctx.message.location &&
-        ctx.wizard.state.waitingForLocation
-      ) {
+      else if (ctx.message && ctx.message.location) {
         // Получаем текущую информацию о прогулке для уведомления участников
         const walkDoc = await db.collection("walks").doc(walkId).get();
         if (!walkDoc.exists) {
@@ -1777,6 +1943,17 @@ const editWalkLocationScene = new Scenes.WizardScene(
 
         const walkData = walkDoc.data();
 
+        // Определяем тип местоположения для описания
+        let locationDescription = "Обновлено местоположение";
+
+        if (ctx.wizard.state.waitingForCurrentLocation) {
+          locationDescription = "Текущее местоположение организатора";
+          ctx.wizard.state.waitingForCurrentLocation = false;
+        } else if (ctx.wizard.state.waitingForMapLocation) {
+          locationDescription = "Место выбрано на карте";
+          ctx.wizard.state.waitingForMapLocation = false;
+        }
+
         // Обновляем геолокацию в базе данных
         await db
           .collection("walks")
@@ -1785,6 +1962,7 @@ const editWalkLocationScene = new Scenes.WizardScene(
             location: {
               latitude: ctx.message.location.latitude,
               longitude: ctx.message.location.longitude,
+              description: locationDescription,
             },
             locationText: null,
           });
@@ -1794,12 +1972,12 @@ const editWalkLocationScene = new Scenes.WizardScene(
           const message = `
   📢 Внимание! Организатор изменил место встречи:
   🗓 Дата и время: ${walkData.date}, ${walkData.time}
-  📍 Место: Обновлена геолокация (проверьте детали прогулки)
+  📍 Место: ${locationDescription} (проверьте детали прогулки)
   `;
           await notifyWalkParticipants(walkData.participants, message);
         }
 
-        await ctx.reply("✅ Геолокация встречи успешно обновлена!", {
+        await ctx.reply("✅ Место встречи успешно обновлено!", {
           reply_markup: getMainMenuKeyboard(),
         });
         return ctx.scene.leave();
@@ -1990,6 +2168,292 @@ function getDogSizeText(size) {
   return sizeObj ? sizeObj.text.split(" ")[0] : "Средняя";
 }
 
+// Функция для расчёта расстояния между двумя точками в км (формула гаверсинусов)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Радиус Земли в километрах
+
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = R * c; // Расстояние в километрах
+
+  return distance;
+}
+
+// Функция для поиска прогулок поблизости
+async function findWalksNearby(ctx, latitude, longitude, maxDistance = 3) {
+  try {
+    console.log(
+      `Поиск прогулок рядом с (${latitude}, ${longitude}) в радиусе ${maxDistance} км`
+    );
+
+    // Получаем все прогулки
+    const walksSnapshot = await db.collection("walks").get();
+
+    if (walksSnapshot.empty) {
+      await ctx.reply("Прогулок не найдено.", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
+            [{ text: "⬅️ Назад", callback_data: "find_walk" }],
+          ],
+        },
+      });
+      return;
+    }
+
+    // Фильтруем прогулки по расстоянию
+    const nearbyWalks = [];
+
+    for (const walkDoc of walksSnapshot.docs) {
+      const walk = walkDoc.data();
+
+      // Если у прогулки есть координаты
+      if (walk.location && walk.location.latitude && walk.location.longitude) {
+        const distance = calculateDistance(
+          latitude,
+          longitude,
+          walk.location.latitude,
+          walk.location.longitude
+        );
+
+        // Если прогулка находится в указанном радиусе
+        if (distance <= maxDistance) {
+          nearbyWalks.push({
+            id: walkDoc.id,
+            ...walk,
+            distance: distance, // Добавляем расстояние для сортировки
+          });
+        }
+      }
+    }
+
+    // Если прогулок поблизости не найдено
+    if (nearbyWalks.length === 0) {
+      await ctx.reply(`Прогулок в радиусе ${maxDistance} км не найдено.`, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
+            [{ text: "⬅️ Назад", callback_data: "find_walk" }],
+          ],
+        },
+      });
+      return;
+    }
+
+    // Сортируем прогулки по расстоянию (от ближайших к дальним)
+    nearbyWalks.sort((a, b) => a.distance - b.distance);
+
+    // Выводим сообщение о найденных прогулках
+    await ctx.reply(`Найдено ${nearbyWalks.length} прогулок поблизости:`, {
+      reply_markup: {
+        inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
+      },
+    });
+
+    // Показываем список прогулок
+    for (const walk of nearbyWalks) {
+      const distanceText =
+        walk.distance < 1
+          ? `${Math.round(walk.distance * 1000)} м`
+          : `${walk.distance.toFixed(1)} км`;
+
+      const walkPreview = `
+  🕒 ${walk.date}, ${walk.time}
+  📍 ${walk.locationText || "По геолокации"} (${distanceText} от вас)
+  🐕 Участников: ${walk.participants ? walk.participants.length + 1 : 1}
+  👤 ${walk.dog.name} (${walk.organizer.name}) ${getDogAgeText(walk.dog.age)}
+  ${walk.organizer.username ? "@" + walk.organizer.username : ""}
+        `;
+
+      await ctx.reply(walkPreview, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Подробнее", callback_data: `walk_details_${walk.id}` }],
+          ],
+        },
+      });
+    }
+  } catch (error) {
+    console.error("Ошибка при поиске прогулок поблизости:", error);
+    await ctx.reply("Произошла ошибка при поиске прогулок. Попробуйте снова.", {
+      reply_markup: {
+        inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
+      },
+    });
+  }
+}
+
+async function getLocationCity(latitude, longitude) {
+  try {
+    // Используем OpenStreetMap Nominatim API для обратного геокодирования
+    const response = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=10&addressdetails=1`,
+      {
+        headers: {
+          "User-Agent": "DogMeetBot/1.0", // Важно указать User-Agent для Nominatim API
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Ошибка API: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Извлекаем название города из ответа
+    // Nominatim может вернуть разные уровни: city, town, village и т.д.
+    const city =
+      data.address.city ||
+      data.address.town ||
+      data.address.village ||
+      data.address.suburb ||
+      data.address.county ||
+      data.address.state;
+
+    return city || null;
+  } catch (error) {
+    console.error("Ошибка при определении города:", error);
+    return null; // В случае ошибки возвращаем null
+  }
+}
+
+// Функция для поиска пользователей, которые ранее присоединялись к прогулкам организатора
+async function notifyPreviousParticipants(organizerId, walkId, walkData) {
+  try {
+    console.log(`Поиск прошлых участников для организатора: ${organizerId}`);
+
+    // Преобразуем organizerId в число (если строка)
+    const orgId =
+      typeof organizerId === "string" ? parseInt(organizerId) : organizerId;
+
+    // Получаем все прогулки, где этот пользователь был организатором
+    // Важно: проверяем оба варианта - как строку, так и как число
+    const walksSnapshot = await db.collection("walks").get();
+
+    // Получаем информацию об организаторе
+    const organizer = (
+      await db.collection("users").doc(String(organizerId)).get()
+    ).data();
+
+    if (!organizer) {
+      console.error(`Не найден профиль организатора с ID: ${organizerId}`);
+      return;
+    }
+
+    // Набор для хранения уникальных ID участников
+    const previousParticipantsIds = new Set();
+
+    // Перебираем все прогулки и ищем те, где пользователь был организатором
+    for (const walkDoc of walksSnapshot.docs) {
+      const walk = walkDoc.data();
+
+      // Проверяем, является ли пользователь организатором этой прогулки
+      // ⚠️ Исправленная проверка - сравниваем как числа и как строки
+      const isOrganizer =
+        walk.organizer &&
+        (walk.organizer.id == organizerId || // Нестрогое равенство для разных типов
+          String(walk.organizer.id) === String(organizerId));
+
+      if (!isOrganizer || walkDoc.id === walkId) continue; // Пропускаем не его прогулки и текущую
+
+      console.log(`Найдена прошлая прогулка организатора: ${walkDoc.id}`);
+
+      // Проверяем наличие участников
+      if (walk.participants && walk.participants.length > 0) {
+        console.log(
+          `В прогулке ${walkDoc.id} участников: ${walk.participants.length}`
+        );
+
+        for (const participant of walk.participants) {
+          if (!participant || !participant.id) continue;
+
+          // ⚠️ Исправленная проверка - сравниваем как числа и как строки
+          // Используем нестрогое равенство для сравнения разных типов
+          if (participant.id != organizerId) {
+            console.log(`Добавляем участника: ${participant.id}`);
+            previousParticipantsIds.add(participant.id);
+          }
+        }
+      }
+    }
+
+    console.log(
+      `Всего найдено предыдущих участников: ${previousParticipantsIds.size}`
+    );
+
+    // Отправляем уведомления всем найденным участникам
+    if (previousParticipantsIds.size > 0) {
+      const notificationText = `
+  🔔 НОВАЯ ПРОГУЛКА ОТ ЗНАКОМОГО ХОЗЯИНА!
+  
+  👋 Ранее вы присоединялись к прогулке с ${organizer.name} и ${organizer.dog.name}! 
+  Хотите присоединиться снова?
+  
+  🗓 Дата и время: ${walkData.date}, ${walkData.time}
+  📍 Место: ${walkData.locationText || "По геолокации"}
+  🔄 Тип: ${walkData.type === "single" ? "Разовая" : "Регулярная"}
+  `;
+
+      let sentCount = 0;
+
+      for (const participantId of previousParticipantsIds) {
+        try {
+          await bot.telegram.sendMessage(participantId, notificationText, {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "✅ Присоединиться",
+                    callback_data: `join_walk_${walkId}`,
+                  },
+                ],
+                [
+                  {
+                    text: "🔍 Подробности",
+                    callback_data: `walk_details_${walkId}`,
+                  },
+                ],
+                [
+                  {
+                    text: "❌ Пропустить",
+                    callback_data: "dismiss_notification",
+                  },
+                ],
+              ],
+            },
+          });
+          sentCount++;
+          console.log(`Уведомление отправлено: ${participantId}`);
+        } catch (error) {
+          console.error(
+            `Ошибка отправки уведомления участнику ${participantId}:`,
+            error
+          );
+        }
+      }
+
+      // Сообщаем организатору об отправленных уведомлениях
+      if (sentCount > 0) {
+        await bot.telegram.sendMessage(
+          organizerId,
+          `✅ Отправлено ${sentCount} уведомлений пользователям, которые ранее присоединялись к вашим прогулкам.`
+        );
+      }
+    }
+  } catch (error) {
+    console.error("Ошибка при уведомлении предыдущих участников:", error);
+  }
+}
 // Функция для получения текстового представления возраста собаки
 function getDogAgeText(age) {
   const ageObj = Object.values(DOG_AGES).find((a) => a.value === age);
@@ -2051,13 +2515,17 @@ bot.command("start", async (ctx) => {
 
   if (userDoc.exists) {
     // Если пользователь уже зарегистрирован, показываем главное меню
-    ctx.reply("Привет! С возвращением в DogMeet 🐶", {
-      reply_markup: getMainMenuKeyboard(),
-    });
+    ctx.reply(
+      `Привет, ${userDoc.data().name || ctx.from.first_name}! С возвращением в DogMeet 🐶`,
+      {
+        reply_markup: getMainMenuKeyboard(),
+      }
+    );
   } else {
     // Если пользователь новый, предлагаем зарегистрироваться
+    const name = ctx.from.first_name || "гость";
     ctx.reply(
-      "Привет! DogMeet помогает находить компанию для прогулок с собакой 🐶.\n" +
+      `Привет, ${name}! DogMeet помогает находить компанию для прогулок с собакой 🐶.\n` +
         "🔹 Находите владельцев собак рядом.\n" +
         "🔹 Создавайте прогулки в один клик.\n" +
         "🔹 Присоединяйтесь к другим участникам.",
@@ -2071,6 +2539,25 @@ bot.command("start", async (ctx) => {
 // Обработка кнопок
 bot.action("create_profile", (ctx) => {
   ctx.scene.enter("register");
+});
+
+// Обработчик для возврата к выбору города
+bot.action("back_to_city_selection", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Выберите город из списка:",
+    Markup.inlineKeyboard([
+      ...POPULAR_CITIES.map((city) => [
+        { text: city, callback_data: `city_${city}` },
+      ]),
+      [
+        {
+          text: "📍 Отправить геолокацию (рекомендуется)",
+          callback_data: "send_location_reg",
+        },
+      ],
+    ])
+  );
 });
 
 // Отмена создания прогулки
@@ -2159,68 +2646,12 @@ bot.action("my_walks", async (ctx) => {
     return;
   }
 
-  await ctx.reply("Ваши созданные прогулки:", {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "⬅️ Назад", callback_data: "back_to_main_menu" }],
-      ],
-    },
-  });
+  await ctx.reply("Ваши созданные прогулки:");
 
   // Показываем список прогулок
   await showWalksList(ctx, walksSnapshot.docs);
-});
 
-bot.action("my_participations", async (ctx) => {
-  await ctx.answerCbQuery();
-
-  // Находим прогулки, где пользователь участвует
-  const walksSnapshot = await db.collection("walks").get();
-  const participatingWalks = [];
-
-  for (const walkDoc of walksSnapshot.docs) {
-    const walk = walkDoc.data();
-    if (
-      walk.participants &&
-      walk.participants.some((p) => p.id == ctx.from.id)
-    ) {
-      participatingWalks.push({ id: walkDoc.id, ...walk });
-    }
-  }
-
-  if (participatingWalks.length === 0) {
-    ctx.reply("Вы пока не присоединились ни к одной прогулке.", {
-      reply_markup: getMainMenuKeyboard(),
-    });
-    return;
-  }
-
-  await ctx.reply("Прогулки, к которым вы присоединились:", {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "⬅️ Назад", callback_data: "back_to_main_menu" }],
-      ],
-    },
-  });
-
-  // Показываем список прогулок
-  for (const walk of participatingWalks) {
-    const walkPreview = `
-        🕒 ${walk.date}, ${walk.time}
-        📍 ${walk.locationText || "По геолокации"}
-        🐕 Участников: ${walk.participants.length + 1}
-        👤 ${walk.dog.name} (${walk.organizer.name}) ${getDogAgeText(walk.dog.age)}
-        ${walk.organizer.username ? "@" + walk.organizer.username : ""}
-      `;
-
-    await ctx.reply(walkPreview, {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "Подробнее", callback_data: `walk_details_${walk.id}` }],
-        ],
-      },
-    });
-  }
+  await ctx.reply({ text: "⬅️ Назад", callback_data: "back_to_main_menu" });
 });
 
 bot.action("my_profile", async (ctx) => {
@@ -2280,14 +2711,70 @@ bot.action("edit_profile_menu", async (ctx) => {
 // Обработчики фильтров прогулок
 bot.action("walks_nearby", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply(
-    "Отправьте вашу текущую геолокацию для поиска ближайших прогулок",
-    {
+
+  try {
+    // Получаем данные пользователя
+    const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
+
+    if (!userDoc.exists) {
+      await ctx.reply("Ваш профиль не найден. Пожалуйста, создайте профиль.", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Создать профиль", callback_data: "create_profile" }],
+            [{ text: "⬅️ Назад", callback_data: "find_walk" }],
+          ],
+        },
+      });
+      return;
+    }
+
+    const userData = userDoc.data();
+
+    // Проверяем, есть ли у пользователя сохранённая геолокация
+    if (
+      userData.location &&
+      userData.location.latitude &&
+      userData.location.longitude
+    ) {
+      // Используем сохранённую геолокацию
+      await ctx.reply("Ищем прогулки рядом с вашей сохранённой локацией...");
+      await findWalksNearby(
+        ctx,
+        userData.location.latitude,
+        userData.location.longitude
+      );
+    } else {
+      // Предлагаем отправить текущую геолокацию
+      await ctx.reply(
+        "У вас нет сохранённой геолокации. Пожалуйста, отправьте вашу текущую геолокацию для поиска прогулок поблизости:",
+        {
+          reply_markup: {
+            keyboard: [
+              [
+                {
+                  text: "📍 Отправить моё местоположение",
+                  request_location: true,
+                },
+              ],
+            ],
+            resize_keyboard: true,
+            one_time_keyboard: true,
+          },
+        }
+      );
+
+      // Сохраняем в сессии, что мы ожидаем геолокацию для поиска прогулок
+      if (!ctx.session) ctx.session = {};
+      ctx.session.waitingLocationForNearbyWalks = true;
+    }
+  } catch (error) {
+    console.error("Ошибка при поиске прогулок поблизости:", error);
+    await ctx.reply("Произошла ошибка при поиске прогулок. Попробуйте снова.", {
       reply_markup: {
         inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
       },
-    }
-  );
+    });
+  }
 });
 
 bot.action("walks_today", async (ctx) => {
@@ -2501,7 +2988,7 @@ async function notifyWalkParticipants(participants, message) {
   }
 }
 
-// Обработка просмотра деталей прогулки
+// Обновление функции отображения деталей прогулки
 bot.action(/walk_details_(.+)/, async (ctx) => {
   try {
     const walkId = ctx.match[1];
@@ -2518,10 +3005,24 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
 
     const walk = walkDoc.data();
 
+    // Формируем информацию о местоположении
+    let locationInfo = "Не указано";
+    if (walk.locationText) {
+      locationInfo = walk.locationText;
+    } else if (walk.location) {
+      // Если есть описание местоположения, используем его
+      locationInfo = walk.location.description || "По геолокации";
+
+      // Дополнительно можно добавить кнопку для просмотра на карте
+      if (walk.location.latitude && walk.location.longitude) {
+        locationInfo += " (можно открыть на карте)";
+      }
+    }
+
     // Формируем детальную информацию о прогулке
     let walkDetails = `
   🗓 Прогулка: ${walk.date}, ${walk.time}
-  📍 Место: ${walk.locationText || "По геолокации"}
+  📍 Место: ${locationInfo}
   🔄 Тип: ${walk.type === "single" ? "Разовая" : "Регулярная"}
   👤 Организатор: ${walk.organizer.name} ${walk.organizer.username ? "@" + walk.organizer.username : ""}
   🐕 Собака: ${walk.dog.name}, ${walk.dog.breed}, ${getDogSizeText(walk.dog.size)}, ${getDogAgeText(walk.dog.age)}
@@ -2544,6 +3045,16 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
 
     // Кнопки в зависимости от роли пользователя
     const keyboard = [];
+
+    // Если есть координаты, добавляем кнопку открытия карты
+    if (walk.location && walk.location.latitude && walk.location.longitude) {
+      keyboard.push([
+        {
+          text: "🗺️ Открыть на карте",
+          url: `https://maps.google.com/maps?q=${walk.location.latitude},${walk.location.longitude}`,
+        },
+      ]);
+    }
 
     if (isOrganizer) {
       // Кнопки для организатора
@@ -2894,40 +3405,127 @@ bot.action("back_to_profile", (ctx) => {
   ctx.reply("Вернуться в профиль", { reply_markup: getMainMenuKeyboard() });
 });
 
-// Функция для уведомления пользователей поблизости о новой прогулке
+// Улучшенная функция для уведомления пользователей поблизости о новой прогулке
 async function notifyNearbyUsers(walkId, organizer, walkData) {
-  // В продакшене здесь будет более сложная логика для определения пользователей поблизости
-  // Для простоты, пока просто берем всех пользователей в том же городе
+  try {
+    console.log(`Отправка уведомлений о новой прогулке ${walkId}`);
 
-  const usersSnapshot = await db
-    .collection("users")
-    .where("city", "==", organizer.city)
-    .get();
+    // Если у прогулки нет координат, не можем определить расстояние
+    if (
+      !walkData.location ||
+      !walkData.location.latitude ||
+      !walkData.location.longitude
+    ) {
+      console.log(
+        "У прогулки нет координат, пропускаем отправку уведомлений по геолокации"
+      );
+      return;
+    }
 
-  for (const userDoc of usersSnapshot.docs) {
-    const user = userDoc.data();
+    // Получаем координаты места прогулки
+    const walkLatitude = walkData.location.latitude;
+    const walkLongitude = walkData.location.longitude;
 
-    // Не уведомляем организатора
-    if (user.id === organizer.id) continue;
+    // Получаем всех пользователей из базы данных
+    const usersSnapshot = await db.collection("users").get();
 
-    await bot.telegram.sendMessage(
-      user.id,
-      `
-🔔 Новая прогулка рядом с вами!
-🗓 ${walkData.date}, ${walkData.time}
-👤 Организатор: ${organizer.name}
-🐕 Собака: ${organizer.dog.name}, ${organizer.dog.breed}
-`,
-      Markup.inlineKeyboard([
-        [Markup.button.callback("Подробнее", `walk_details_${walkId}`)],
-      ]),
-      { reply_markup: getMainMenuKeyboard() }
-    );
+    let notificationCount = 0;
+
+    // Перебираем всех пользователей
+    for (const userDoc of usersSnapshot.docs) {
+      const user = userDoc.data();
+
+      // Пропускаем организатора (не отправляем уведомление самому себе)
+      if (user.id === organizer.id) continue;
+
+      // Проверяем, есть ли у пользователя сохраненная геолокация
+      if (user.location && user.location.latitude && user.location.longitude) {
+        // Рассчитываем расстояние между пользователем и местом прогулки
+        const distance = calculateDistance(
+          user.location.latitude,
+          user.location.longitude,
+          walkLatitude,
+          walkLongitude
+        );
+
+        // Если пользователь находится в радиусе 3 км от места прогулки
+        if (distance <= 3) {
+          console.log(
+            `Пользователь ${user.id} находится в ${distance.toFixed(2)} км от прогулки, отправляем уведомление`
+          );
+
+          // Форматируем расстояние для отображения
+          const distanceText =
+            distance < 1
+              ? `${Math.round(distance * 1000)} метрах`
+              : `${distance.toFixed(1)} км`;
+
+          // Формируем подробную информацию о прогулке
+          const walkDetailsText = `
+  🔔 НОВАЯ ПРОГУЛКА РЯДОМ С ВАМИ!
+  
+  🗓 Дата и время: ${walkData.date}, ${walkData.time}
+  📍 Место: ${walkData.locationText || "По геолокации"} (в ${distanceText} от вас)
+  🔄 Тип: ${walkData.type === "single" ? "Разовая" : "Регулярная"}
+            
+  👤 Организатор: ${organizer.name}
+  🐕 Собака: ${organizer.dog.name}, ${organizer.dog.breed}, ${getDogSizeText(organizer.dog.size)}, ${getDogAgeText(organizer.dog.age)}
+            
+  Присоединяйтесь к прогулке!
+  `;
+
+          // Отправляем уведомление пользователю
+          await bot.telegram.sendMessage(user.id, walkDetailsText, {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "✅ Присоединиться",
+                    callback_data: `join_walk_${walkId}`,
+                  },
+                ],
+                [
+                  {
+                    text: "🔍 Подробности",
+                    callback_data: `walk_details_${walkId}`,
+                  },
+                ],
+                [
+                  {
+                    text: "❌ Пропустить",
+                    callback_data: "dismiss_notification",
+                  },
+                ],
+              ],
+            },
+          });
+
+          // Если у организатора есть фото собаки, отправляем и его
+          if (organizer.dog.photoId) {
+            await bot.telegram.sendPhoto(user.id, organizer.dog.photoId, {
+              caption: "Фото собаки организатора",
+            });
+          }
+
+          notificationCount++;
+        }
+      }
+    }
+
+    console.log(`Отправлено ${notificationCount} уведомлений о новой прогулке`);
+
+    // Информируем организатора о количестве отправленных уведомлений
+    if (notificationCount > 0) {
+      await bot.telegram.sendMessage(
+        organizer.id,
+        `✅ Ваша прогулка создана! Отправлено ${notificationCount} уведомлений владельцам собак поблизости.`
+      );
+    }
+  } catch (error) {
+    console.error("Ошибка при отправке уведомлений о новой прогулке:", error);
   }
 }
 
-// Функция для напоминания о предстоящих прогулках
-// Функция для напоминания о предстоящих прогулках и удаления прошедших
 // Функция для напоминания о предстоящих прогулках и удаления прошедших
 async function remindAboutWalks() {
   const now = new Date();
@@ -3054,67 +3652,134 @@ bot.action("my_walks", async (ctx) => {
     return;
   }
 
-  await ctx.reply("Ваши созданные прогулки:", {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "⬅️ Назад", callback_data: "back_to_main_menu" }],
-      ],
-    },
-  });
+  await ctx.reply("Ваши созданные прогулки:");
 
   // Показываем список прогулок
   await showWalksList(ctx, walksSnapshot.docs);
+
+  await ctx.reply({ text: "⬅️ Назад", callback_data: "back_to_main_menu" });
 });
 
 bot.action("my_participations", async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
 
-  // Находим прогулки, где пользователь участвует
-  const walksSnapshot = await db.collection("walks").get();
-  const participatingWalks = [];
+    // Находим прогулки, где пользователь участвует
+    const walksSnapshot = await db.collection("walks").get();
 
-  for (const walkDoc of walksSnapshot.docs) {
-    const walk = walkDoc.data();
-    if (
-      walk.participants &&
-      walk.participants.some((p) => p.id == ctx.from.id)
-    ) {
-      participatingWalks.push({ id: walkDoc.id, ...walk });
+    // Массив для всех прогулок (и организованных, и где участвует)
+    const allInvolvedWalks = [];
+
+    // Перебираем все прогулки
+    for (const walkDoc of walksSnapshot.docs) {
+      const walk = walkDoc.data();
+      const walkId = walkDoc.id;
+
+      // Проверяем, является ли пользователь организатором
+      if (walk.organizer.id == ctx.from.id) {
+        // Добавляем пометку, что это собственная прогулка
+        allInvolvedWalks.push({
+          id: walkId,
+          ...walk,
+          isOwn: true, // Пометка "Моя прогулка"
+        });
+      }
+      // Проверяем, является ли пользователь участником
+      else if (
+        walk.participants &&
+        walk.participants.some((p) => p.id == ctx.from.id)
+      ) {
+        allInvolvedWalks.push({
+          id: walkId,
+          ...walk,
+          isOwn: false,
+        });
+      }
     }
-  }
 
-  if (participatingWalks.length === 0) {
-    ctx.reply("Вы пока не присоединились ни к одной прогулке.", {
+    // Если прогулок нет вообще
+    if (allInvolvedWalks.length === 0) {
+      ctx.reply("Вы пока не участвуете ни в одной прогулке.", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
+            [{ text: "📍 Найти прогулку", callback_data: "find_walk" }],
+            [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+          ],
+        },
+      });
+      return;
+    }
+
+    // Сортируем прогулки по дате и времени (от ближайших к дальним)
+    allInvolvedWalks.sort((a, b) => {
+      // Сначала сравниваем даты
+      const dateA = a.date.split(".").reverse().join("-");
+      const dateB = b.date.split(".").reverse().join("-");
+
+      if (dateA !== dateB) {
+        return dateA.localeCompare(dateB);
+      }
+
+      // Если даты одинаковые, сравниваем время
+      return a.time.localeCompare(b.time);
+    });
+
+    await ctx.reply("Прогулки, в которых вы участвуете:");
+
+    // Показываем список прогулок с пометкой для собственных
+    for (const walk of allInvolvedWalks) {
+      // Добавляем пометку для собственных прогулок - вот эта строка исправляет проблему
+      const ownLabel = walk.isOwn ? "🌟 МОЯ ПРОГУЛКА" : "";
+
+      // Получаем возраст собаки текстом, гарантируя что это строка
+      const dogAge =
+        typeof walk.dog.age === "string" ? getDogAgeText(walk.dog.age) : "";
+
+      // Важно! Форматирование строки было неправильным, исправляем
+      const walkPreview =
+        `${ownLabel ? ownLabel + "\n" : ""}🕒 ${walk.date}, ${walk.time}
+  📍 ${walk.locationText || "По геолокации"}
+  🐕 Участников: ${walk.participants ? walk.participants.length + 1 : 1}
+  👤 ${walk.dog.name} (${walk.organizer.name}) ${dogAge}
+  ${walk.organizer.username ? "@" + walk.organizer.username : ""}`.trim();
+
+      await ctx.reply(walkPreview, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Подробнее", callback_data: `walk_details_${walk.id}` }],
+          ],
+        },
+      });
+    }
+
+    await ctx.reply({ text: "⬅️ Назад", callback_data: "back_to_main_menu" });
+  } catch (error) {
+    console.error("Ошибка при отображении участия в прогулках:", error);
+    await ctx.reply("Произошла ошибка. Попробуйте снова.", {
       reply_markup: getMainMenuKeyboard(),
     });
-    return;
   }
+});
+// Обработчик для кнопки "Пропустить уведомление"
+bot.action("dismiss_notification", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Уведомление пропущено");
 
-  await ctx.reply("Прогулки, к которым вы присоединились:", {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "⬅️ Назад", callback_data: "back_to_main_menu" }],
-      ],
-    },
-  });
+    // Удаляем кнопки из сообщения
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
 
-  // Показываем список прогулок
-  for (const walk of participatingWalks) {
-    const walkPreview = `
-        🕒 ${walk.date}, ${walk.time}
-        📍 ${walk.locationText || "По геолокации"}
-        🐕 Участников: ${walk.participants.length + 1}
-        👤 ${walk.dog.name} (${walk.organizer.name}) ${getDogAgeText(walk.dog.age)}
-        ${walk.organizer.username ? "@" + walk.organizer.username : ""}
-      `;
-
-    await ctx.reply(walkPreview, {
+    // Опционально можно отправить сообщение с другими опциями
+    await ctx.reply("Вы можете найти другие прогулки в меню:", {
       reply_markup: {
         inline_keyboard: [
-          [{ text: "Подробнее", callback_data: `walk_details_${walk.id}` }],
+          [{ text: "📍 Найти прогулку", callback_data: "find_walk" }],
+          [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
         ],
       },
     });
+  } catch (error) {
+    console.error("Ошибка при обработке пропуска уведомления:", error);
   }
 });
 
@@ -3520,9 +4185,237 @@ bot.action(/city_(.+)/, async (ctx) => {
   });
   return ctx.scene.enter("editProfileMenu");
 });
-bot.action("send_location", (ctx) => {
-  ctx.reply("Отправьте геолокацию:", Markup.removeKeyboard());
+bot.action("send_location_reg", async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+
+    // Первое сообщение с подсказкой о проверке настроек
+    await ctx.reply(
+      `🐶 <b>Отлично!</b> Геолокация поможет находить собачьи прогулки рядом с вами.
+  
+  <i>Небольшая проверка перед продолжением:</i>
+  - Убедитесь, что у Telegram есть разрешение на доступ к геолокации
+  - Включите геолокацию на вашем устройстве
+  - Если кнопка не работает, проверьте настройки приватности в Telegram
+  
+  Нажмите кнопку ниже, когда будете готовы:`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.keyboard([
+          [Markup.button.locationRequest("📍 Отправить мою геолокацию")],
+        ]).resize(),
+      }
+    );
+
+    // В сцене этот флаг уже устанавливается, но для надежности установим и здесь
+    if (ctx.wizard && ctx.wizard.state) {
+      ctx.wizard.state.waitingForLocationReg = true;
+    }
+  } catch (error) {
+    console.error("Ошибка при запросе геолокации:", error);
+    await ctx.reply(
+      "Произошла ошибка при запросе геолокации. Пожалуйста, выберите город из списка или попробуйте отправить геолокацию позже.",
+      Markup.inlineKeyboard([
+        ...POPULAR_CITIES.map((city) => [
+          { text: city, callback_data: `city_${city}` },
+        ]),
+        [{ text: "↩️ Назад", callback_data: "back_to_city_selection" }],
+      ])
+    );
+  }
 });
+
+// Обновленный обработчик публикации прогулки
+bot.action("publish_walk", async (ctx) => {
+  try {
+    console.log("Публикация новой прогулки");
+
+    // Получаем данные из scene.state
+    const walkData = ctx.scene.state.walkData;
+    const userData = ctx.scene.state.userData;
+
+    // Проверяем, что данные существуют
+    if (!walkData || !userData) {
+      throw new Error("Данные о прогулке отсутствуют");
+    }
+
+    console.log("Данные прогулки:", walkData);
+
+    // Создаем прогулку в БД
+    const walkRef = await db.collection("walks").add({
+      date: walkData.date,
+      time: walkData.time,
+      locationText: walkData.locationText || null,
+      location: walkData.location || null,
+      type: walkData.type,
+      organizer: {
+        id: ctx.from.id,
+        name: userData.name,
+        username: ctx.from.username || null,
+      },
+      dog: {
+        name: userData.dog.name,
+        breed: userData.dog.breed,
+        size: userData.dog.size,
+        age: userData.dog.age,
+        photoId: userData.dog.photoId,
+      },
+      participants: [],
+      createdAt: new Date(),
+    });
+
+    // Удаляем кнопки
+    try {
+      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    } catch (error) {
+      console.error("Ошибка при удалении клавиатуры:", error);
+    }
+
+    // Сообщаем об успехе
+    await ctx.reply(
+      "✅ Прогулка создана! Мы уведомим владельцев собак поблизости.",
+      { reply_markup: getMainMenuKeyboard() }
+    );
+
+    // Уведомляем других пользователей поблизости
+    console.log("Запускаем отправку уведомлений");
+    await notifyNearbyUsers(walkRef.id, userData, walkData);
+
+    // Уведомляем предыдущих участников
+    console.log("Запускаем отправку уведомлений предыдущим участникам");
+    await notifyPreviousParticipants(ctx.from.id, walkRef.id, walkData);
+
+    return ctx.scene.leave();
+  } catch (error) {
+    console.error("Ошибка при публикации прогулки:", error);
+    await ctx.reply(
+      "Произошла ошибка при публикации прогулки. Попробуйте снова.",
+      { reply_markup: getMainMenuKeyboard() }
+    );
+    return ctx.scene.leave();
+  }
+});
+
+bot.action("walk_here", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Нажмите кнопку, чтобы отправить ваше текущее местоположение:",
+    Markup.keyboard([
+      [Markup.button.locationRequest("📍 Моё текущее местоположение")],
+    ]).resize()
+  );
+  ctx.wizard.state.waitingForWalkHere = true;
+});
+
+// При редактировании профиля
+bot.action("current_location", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Нажмите кнопку, чтобы отправить ваше текущее местоположение:",
+    Markup.keyboard([
+      [Markup.button.locationRequest("📍 Отправить моё местоположение")],
+    ]).resize()
+  );
+  ctx.wizard.state.waitingForCurrentLocation = true;
+});
+
+bot.action("choose_map_location", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Выберите место на карте и отправьте:",
+    Markup.keyboard([
+      [Markup.button.locationRequest("📍 Выбрать место на карте")],
+    ]).resize()
+  );
+  ctx.wizard.state.waitingForMapLocation = true;
+});
+
+// При редактировании прогулки
+bot.action("current_location_walk", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Нажмите кнопку, чтобы отправить ваше текущее местоположение:",
+    Markup.keyboard([
+      [Markup.button.locationRequest("📍 Отправить моё местоположение")],
+    ]).resize()
+  );
+  ctx.wizard.state.waitingForCurrentLocation = true;
+});
+
+bot.action("choose_map_walk", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    "Выберите место встречи на карте и отправьте:",
+    Markup.keyboard([
+      [Markup.button.locationRequest("📍 Выбрать место на карте")],
+    ]).resize()
+  );
+  ctx.wizard.state.waitingForMapLocation = true;
+});
+
+// Общий обработчик для просмотра местоположения на карте
+bot.action(/view_location_(.+)/, async (ctx) => {
+  try {
+    const walkId = ctx.match[1];
+    await ctx.answerCbQuery("Открываем карту...");
+
+    const walkDoc = await db.collection("walks").doc(walkId).get();
+    if (!walkDoc.exists) {
+      return;
+    }
+
+    const walk = walkDoc.data();
+    if (!walk.location || !walk.location.latitude || !walk.location.longitude) {
+      await ctx.reply(
+        "Для этой прогулки не указаны координаты местоположения."
+      );
+      return;
+    }
+
+    // Отправляем местоположение на карте
+    await ctx.replyWithLocation(
+      walk.location.latitude,
+      walk.location.longitude
+    );
+  } catch (error) {
+    console.error("Ошибка при отображении местоположения:", error);
+  }
+});
+
+bot.on("location", async (ctx) => {
+  try {
+    // Получаем координаты
+    const location = ctx.message.location;
+    console.log("Получена геолокация:", location);
+
+    // Проверяем, ожидаем ли мы геолокацию для поиска прогулок
+    if (ctx.session && ctx.session.waitingLocationForNearbyWalks) {
+      // Сбрасываем флаг ожидания
+      ctx.session.waitingLocationForNearbyWalks = false;
+
+      // Поиск прогулок поблизости
+      await ctx.reply("Ищем прогулки поблизости...");
+      await findWalksNearby(ctx, location.latitude, location.longitude);
+
+      // Убираем клавиатуру
+      await ctx.reply("Поиск завершен", {
+        reply_markup: { remove_keyboard: true },
+      });
+    }
+
+    // Другие обработчики геолокации могут быть здесь, но они должны проверять
+    // свои соответствующие флаги в ctx.session или ctx.wizard.state
+  } catch (error) {
+    console.error("Ошибка при обработке геолокации:", error);
+    await ctx.reply(
+      "Произошла ошибка при обработке геолокации. Попробуйте снова.",
+      {
+        reply_markup: { remove_keyboard: true },
+      }
+    );
+  }
+});
+
 bot.action("cancel_edit", (ctx) => {
   ctx.reply("Редактирование отменено", { reply_markup: getMainMenuKeyboard() });
   return ctx.scene.enter("editProfileMenu");
@@ -3649,10 +4542,6 @@ bot.action("walks_all_dates", async (ctx) => {
 
 bot.action("send_location", (ctx) => {
   ctx.reply("Отправьте геолокацию:", Markup.removeKeyboard());
-});
-bot.action("enter_location_text", (ctx) => {
-  ctx.reply("Опишите место встречи:", Markup.removeKeyboard());
-  ctx.wizard.state.waitingForLocationText = true;
 });
 
 // Обработчики даты с прямым переходом к выбору времени
