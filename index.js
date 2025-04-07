@@ -151,8 +151,7 @@ const POPULAR_CITIES = [
 // Сцена регистрации пользователя
 const registerScene = new Scenes.WizardScene(
   "register",
-  // Шаг 1: Теперь сразу берем имя из профиля и переходим к выбору города
-  (ctx) => {
+  async (ctx) => {
     // Инициализируем объект с данными пользователя
     ctx.wizard.state.userData = {};
 
@@ -160,60 +159,81 @@ const registerScene = new Scenes.WizardScene(
     const firstName = ctx.from.first_name || "";
     const lastName = ctx.from.last_name || "";
 
-    // Сохраняем полное имя (или только имя, если фамилии нет)
+    // Сохраняем полное имя
     ctx.wizard.state.userData.name =
       firstName + (lastName ? " " + lastName : "");
 
-    // Улучшенный текст с объяснением преимуществ геолокации
-    ctx.reply(
-      `Привет, ${ctx.wizard.state.userData.name}! 🐾\n\nЧтобы находить прогулки рядом с вами, мне нужно узнать, где вы находитесь.`
-    );
+    // Отправляем первое сообщение и сохраняем его ID
+    const welcomeText =
+      `${ctx.wizard.state.userData.name}, Чтобы находить прогулки рядом с вами, мне нужно узнать, где вы находитесь.\n\n` +
+      `💡 <b>Совет</b>: Отправка геолокации позволит:\n` +
+      `• Получать уведомления о прогулках поблизости\n` +
+      `• Использовать фильтр "Прогулки рядом"\n` +
+      `• Находить собачьих друзей в вашем районе`;
 
-    // Второе сообщение - объяснение и кнопки
-    ctx.reply(
-      `💡 <b>Совет</b>: Отправка геолокации позволит:\n• Получать уведомления о прогулках поблизости\n• Использовать фильтр "Прогулки рядом"\n• Находить собачьих друзей в вашем районе`,
-      {
-        parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: [
-            // Кнопки с городами
-            ...POPULAR_CITIES.map((city) => [
-              { text: city, callback_data: `city_${city}` },
-            ]),
-            // Кнопка геолокации
-            [
-              {
-                text: "📍 Отправить геолокацию (рекомендуется)",
-                callback_data: "send_location_reg",
-              },
-            ],
-          ],
-        },
-      }
-    );
+    const keyboard = {
+      inline_keyboard: [
+        // Кнопки с городами
+        ...POPULAR_CITIES.map((city) => [
+          { text: city, callback_data: `city_${city}` },
+        ]),
+        // Кнопка геолокации
+        [
+          {
+            text: "📍 Отправить геолокацию (рекомендуется)",
+            callback_data: "send_location_reg",
+          },
+        ],
+      ],
+    };
+
+    // Отправляем сообщение и сохраняем ID
+    const msg = await ctx.reply(welcomeText, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
+
+    // Сохраняем ID сообщения
+    ctx.wizard.state.messageId = msg.message_id;
+
     return ctx.wizard.next();
   },
 
-  // Шаг 2: Обработка города (теперь это первый шаг для пользователя)
-  (ctx) => {
+  // Шаг 2: Обработка города/геолокации
+  async (ctx) => {
     try {
       // Обработка callback
       if (ctx.callbackQuery) {
         const data = ctx.callbackQuery.data;
-        ctx.answerCbQuery();
+        await ctx.answerCbQuery();
 
         if (data.startsWith("city_")) {
           ctx.wizard.state.userData.city = data.replace("city_", "");
+
+          // Обновляем сообщение - переходим к имени собаки
+          await updateWizardMessage(ctx, "Как зовут вашу собаку?", null);
+
+          return ctx.wizard.next();
         } else if (data === "send_location_reg") {
+          // Обновляем сообщение с запросом геолокации
+          await updateWizardMessage(
+            ctx,
+            "Нажмите кнопку внизу экрана, чтобы отправить вашу геолокацию:",
+            null
+          );
+
           // Показываем физическую клавиатуру с кнопкой геолокации
-          ctx.reply(
-            "Нажмите кнопку, чтобы отправить вашу геолокацию:",
+          const keyboardMsg = await ctx.reply(
+            "Используйте эту кнопку:",
             Markup.keyboard([
               [Markup.button.locationRequest("📍 Отправить мою геолокацию")],
             ]).resize()
           );
+
+          // Сохраняем ID сообщения с клавиатурой чтобы удалить позже
+          ctx.wizard.state.keyboardMsgId = keyboardMsg.message_id;
           ctx.wizard.state.waitingForLocationReg = true;
-          return; // Ожидаем следующее сообщение с геолокацией
+          return;
         }
       }
       // Обработка геолокации
@@ -226,83 +246,124 @@ const registerScene = new Scenes.WizardScene(
           longitude: ctx.message.location.longitude,
         };
 
+        // Удаляем сообщение с геолокацией
+        try {
+          await ctx.deleteMessage(ctx.message.message_id);
+        } catch (error) {
+          console.log("Не удалось удалить сообщение с геолокацией");
+        }
+
+        // Удаляем сообщение с клавиатурой
+        if (ctx.wizard.state.keyboardMsgId) {
+          try {
+            await ctx.deleteMessage(ctx.wizard.state.keyboardMsgId);
+            delete ctx.wizard.state.keyboardMsgId;
+          } catch (error) {
+            console.log("Не удалось удалить сообщение с клавиатурой");
+          }
+        }
+
         // Получаем название города из координат
-        getLocationCity(
+        const cityName = await getLocationCity(
           ctx.message.location.latitude,
           ctx.message.location.longitude
-        )
-          .then((cityName) => {
-            // Если город определен - используем его, если нет - используем общую фразу
-            ctx.wizard.state.userData.city =
-              cityName || "Определен по геолокации";
-            console.log(`Определен город: ${ctx.wizard.state.userData.city}`);
-          })
-          .catch((error) => {
-            console.error("Ошибка при определении города:", error);
-            ctx.wizard.state.userData.city = "Определен по геолокации";
-          })
-          .finally(() => {
-            // Убираем физическую клавиатуру геолокации
-            ctx.reply(
-              "🎉 Отлично! Теперь вы будете получать уведомления о прогулках рядом с вами.",
-              Markup.removeKeyboard()
-            );
+        ).catch((err) => {
+          console.error("Ошибка при определении города:", err);
+          return "Определен по геолокации";
+        });
 
-            // Переходим к следующему шагу (имя собаки)
-            ctx.reply("Как зовут вашу собаку?");
-            ctx.wizard.next();
-          });
+        ctx.wizard.state.userData.city = cityName || "Определен по геолокации";
 
-        return; // Ждем завершения асинхронного определения города
+        // Обновляем основное сообщение с подтверждением и запросом имени собаки
+        await updateWizardMessage(
+          ctx,
+          "🎉 Отлично! Геолокация сохранена.\n\nКак зовут вашу собаку?",
+          null
+        );
+
+        return ctx.wizard.next();
       }
 
-      // Продолжаем регистрацию
-      ctx.reply("Как зовут вашу собаку?", Markup.removeKeyboard());
+      // Если мы здесь без геолокации/callback, спрашиваем имя собаки
+      await updateWizardMessage(ctx, "Как зовут вашу собаку?", null);
       return ctx.wizard.next();
     } catch (error) {
       console.error("Ошибка при обработке города/геолокации:", error);
-      ctx.reply(
-        "Произошла ошибка. Пожалуйста, выберите город из списка.",
-        Markup.removeKeyboard()
+      await updateWizardMessage(
+        ctx,
+        "Произошла ошибка. Пожалуйста, выберите город из списка:",
+        {
+          inline_keyboard: POPULAR_CITIES.map((city) => [
+            { text: city, callback_data: `city_${city}` },
+          ]),
+        }
       );
       // Не переходим дальше, оставаясь на этом шаге
       return;
     }
   },
-  // Шаг 4: Порода собаки
-  (ctx) => {
+
+  // Шаг 3: Имя собаки
+  async (ctx) => {
     if (ctx.message && ctx.message.text) {
       if (!isValidString(ctx.message.text)) {
-        ctx.reply("Пожалуйста, введите корректную породу:");
+        await updateWizardMessage(
+          ctx,
+          "Пожалуйста, введите корректное имя собаки:"
+        );
         return; // Остаемся на этом же шаге
       }
+
       ctx.wizard.state.userData.dogName = ctx.message.text;
+
+      // Удаляем сообщение пользователя, чтобы не засорять чат
+      try {
+        await ctx.deleteMessage(ctx.message.message_id);
+      } catch (error) {
+        console.log("Не удалось удалить сообщение пользователя");
+      }
     }
 
-    ctx.reply(
-      "Выберите породу",
-      Markup.inlineKeyboard(
-        POPULAR_BREEDS.map((breed) => [
-          { text: breed, callback_data: `breed_${breed}` },
-        ])
-      )
-    );
+    // Обновляем сообщение с выбором породы
+    const keyboard = {
+      inline_keyboard: POPULAR_BREEDS.map((breed) => [
+        { text: breed, callback_data: `breed_${breed}` },
+      ]),
+    };
+
+    await updateWizardMessage(ctx, "Выберите породу", keyboard);
     return ctx.wizard.next();
   },
 
-  // Шаг 5: Размер собаки
-  (ctx) => {
+  // Шаг 4: Порода собаки
+  async (ctx) => {
     // Обработка callback для выбора породы
     if (ctx.callbackQuery && ctx.callbackQuery.data.startsWith("breed_")) {
       const breed = ctx.callbackQuery.data.replace("breed_", "");
-      ctx.answerCbQuery();
+      await ctx.answerCbQuery();
 
       if (breed === "Другая (ввести текстом)") {
-        ctx.reply("Введите породу вашей собаки:");
+        await updateWizardMessage(ctx, "Введите породу вашей собаки:");
         ctx.wizard.state.waitingForCustomBreed = true;
         return;
       } else {
         ctx.wizard.state.userData.dogBreed = breed;
+
+        // Переходим к следующему шагу - размер собаки
+        const sizeKeyboard = {
+          inline_keyboard: [
+            [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
+            [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
+            [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
+          ],
+        };
+
+        await updateWizardMessage(
+          ctx,
+          "Какого размера ваша собака?",
+          sizeKeyboard
+        );
+        return ctx.wizard.next();
       }
     }
     // Обработка ввода произвольной породы
@@ -312,34 +373,84 @@ const registerScene = new Scenes.WizardScene(
       ctx.message.text
     ) {
       if (!isValidString(ctx.message.text)) {
-        ctx.reply("Пожалуйста, введите корректную породу:");
+        await updateWizardMessage(
+          ctx,
+          "Пожалуйста, введите корректную породу:"
+        );
         return; // Остаемся на этом же шаге
       }
+
       ctx.wizard.state.userData.dogBreed = ctx.message.text;
       ctx.wizard.state.waitingForCustomBreed = false;
+
+      // Удаляем сообщение пользователя, чтобы не засорять чат
+      try {
+        await ctx.deleteMessage(ctx.message.message_id);
+      } catch (error) {
+        console.log("Не удалось удалить сообщение пользователя");
+      }
+
+      // Переходим к следующему шагу - размер собаки
+      const sizeKeyboard = {
+        inline_keyboard: [
+          [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
+          [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
+          [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
+        ],
+      };
+
+      await updateWizardMessage(
+        ctx,
+        "Какого размера ваша собака?",
+        sizeKeyboard
+      );
+      return ctx.wizard.next();
     }
     // Если напрямую ввели текст (на всякий случай)
     else if (ctx.message && ctx.message.text) {
       ctx.wizard.state.userData.dogBreed = ctx.message.text;
+
+      // Удаляем сообщение пользователя
+      try {
+        await ctx.deleteMessage(ctx.message.message_id);
+      } catch (error) {
+        console.log("Не удалось удалить сообщение пользователя");
+      }
+
+      // Переходим к следующему шагу
+      const sizeKeyboard = {
+        inline_keyboard: [
+          [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
+          [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
+          [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
+        ],
+      };
+
+      await updateWizardMessage(
+        ctx,
+        "Какого размера ваша собака?",
+        sizeKeyboard
+      );
+      return ctx.wizard.next();
     }
 
-    ctx.reply(
-      "Какого размера ваша собака?",
-      Markup.inlineKeyboard([
-        [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
-        [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
-        [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
-      ])
-    );
-    return ctx.wizard.next();
+    // Запрашиваем породу, если как-то попали сюда без данных
+    const breedKeyboard = {
+      inline_keyboard: POPULAR_BREEDS.map((breed) => [
+        { text: breed, callback_data: `breed_${breed}` },
+      ]),
+    };
+
+    await updateWizardMessage(ctx, "Выберите породу", breedKeyboard);
+    return;
   },
 
-  // Шаг 6: Возраст собаки
-  (ctx) => {
+  // Шаг 5: Размер собаки
+  async (ctx) => {
     // Обработка callback для выбора размера
     if (ctx.callbackQuery) {
       const data = ctx.callbackQuery.data;
-      ctx.answerCbQuery();
+      await ctx.answerCbQuery();
 
       if (data === "size_small") {
         ctx.wizard.state.userData.dogSize = "small";
@@ -348,6 +459,19 @@ const registerScene = new Scenes.WizardScene(
       } else if (data === "size_large") {
         ctx.wizard.state.userData.dogSize = "large";
       }
+
+      // Переходим к следующему шагу - возраст собаки
+      const ageKeyboard = {
+        inline_keyboard: [
+          [{ text: DOG_AGES.PUPPY.text, callback_data: "age_puppy" }],
+          [{ text: DOG_AGES.YOUNG.text, callback_data: "age_young" }],
+          [{ text: DOG_AGES.ADULT.text, callback_data: "age_adult" }],
+          [{ text: DOG_AGES.SENIOR.text, callback_data: "age_senior" }],
+        ],
+      };
+
+      await updateWizardMessage(ctx, "Возраст собаки:", ageKeyboard);
+      return ctx.wizard.next();
     }
     // Обработка текстового ввода размера (на всякий случай)
     else if (ctx.message && ctx.message.text) {
@@ -358,30 +482,53 @@ const registerScene = new Scenes.WizardScene(
       ctx.wizard.state.userData.dogSize = size
         ? size.value
         : DOG_SIZES.MEDIUM.value;
+
+      // Удаляем сообщение пользователя
+      try {
+        await ctx.deleteMessage(ctx.message.message_id);
+      } catch (error) {
+        console.log("Не удалось удалить сообщение пользователя");
+      }
+
+      // Переходим к следующему шагу
+      const ageKeyboard = {
+        inline_keyboard: [
+          [{ text: DOG_AGES.PUPPY.text, callback_data: "age_puppy" }],
+          [{ text: DOG_AGES.YOUNG.text, callback_data: "age_young" }],
+          [{ text: DOG_AGES.ADULT.text, callback_data: "age_adult" }],
+          [{ text: DOG_AGES.SENIOR.text, callback_data: "age_senior" }],
+        ],
+      };
+
+      await updateWizardMessage(ctx, "Возраст собаки:", ageKeyboard);
+      return ctx.wizard.next();
     }
-    // Если размер не был выбран, устанавливаем средний по умолчанию
-    else if (!ctx.wizard.state.userData.dogSize) {
+
+    // Если почему-то размер не был выбран, устанавливаем средний по умолчанию
+    if (!ctx.wizard.state.userData.dogSize) {
       ctx.wizard.state.userData.dogSize = DOG_SIZES.MEDIUM.value;
     }
 
-    ctx.reply(
-      "Возраст собаки:",
-      Markup.inlineKeyboard([
+    // Запрашиваем возраст (на всякий случай)
+    const ageKeyboard = {
+      inline_keyboard: [
         [{ text: DOG_AGES.PUPPY.text, callback_data: "age_puppy" }],
         [{ text: DOG_AGES.YOUNG.text, callback_data: "age_young" }],
         [{ text: DOG_AGES.ADULT.text, callback_data: "age_adult" }],
         [{ text: DOG_AGES.SENIOR.text, callback_data: "age_senior" }],
-      ])
-    );
+      ],
+    };
+
+    await updateWizardMessage(ctx, "Возраст собаки:", ageKeyboard);
     return ctx.wizard.next();
   },
 
-  // Шаг 7: Фото собаки
+  // Шаг 6: Возраст собаки
   async (ctx) => {
     // Обработка callback для выбора возраста
     if (ctx.callbackQuery) {
       const data = ctx.callbackQuery.data;
-      ctx.answerCbQuery();
+      await ctx.answerCbQuery();
 
       if (data === "age_puppy") {
         ctx.wizard.state.userData.dogAge = "puppy";
@@ -392,6 +539,20 @@ const registerScene = new Scenes.WizardScene(
       } else if (data === "age_senior") {
         ctx.wizard.state.userData.dogAge = "senior";
       }
+
+      // Переходим к следующему шагу - загрузка фото
+      const photoKeyboard = {
+        inline_keyboard: [
+          [{ text: "Пропустить ⏭️", callback_data: "skip_photo" }],
+        ],
+      };
+
+      await updateWizardMessage(
+        ctx,
+        "Загрузите фото вашей собаки 📸 (необязательно)",
+        photoKeyboard
+      );
+      return ctx.wizard.next();
     }
     // Обработка текстового ввода возраста (на всякий случай)
     else if (ctx.message && ctx.message.text) {
@@ -400,23 +561,50 @@ const registerScene = new Scenes.WizardScene(
       );
 
       ctx.wizard.state.userData.dogAge = age ? age.value : DOG_AGES.ADULT.value;
+
+      // Удаляем сообщение пользователя
+      try {
+        await ctx.deleteMessage(ctx.message.message_id);
+      } catch (error) {
+        console.log("Не удалось удалить сообщение пользователя");
+      }
+
+      // Переходим к следующему шагу
+      const photoKeyboard = {
+        inline_keyboard: [
+          [{ text: "Пропустить ⏭️", callback_data: "skip_photo" }],
+        ],
+      };
+
+      await updateWizardMessage(
+        ctx,
+        "Загрузите фото вашей собаки 📸 (необязательно)",
+        photoKeyboard
+      );
+      return ctx.wizard.next();
     }
+
     // Если возраст не был выбран, устанавливаем взрослый по умолчанию
-    else if (!ctx.wizard.state.userData.dogAge) {
+    if (!ctx.wizard.state.userData.dogAge) {
       ctx.wizard.state.userData.dogAge = DOG_AGES.ADULT.value;
     }
 
-    // Добавляем кнопку "Пропустить"
-    ctx.reply(
-      "Загрузите фото вашей собаки 📸 (необязательно)",
-      Markup.inlineKeyboard([
+    // Запрашиваем фото (на всякий случай)
+    const photoKeyboard = {
+      inline_keyboard: [
         [{ text: "Пропустить ⏭️", callback_data: "skip_photo" }],
-      ])
+      ],
+    };
+
+    await updateWizardMessage(
+      ctx,
+      "Загрузите фото вашей собаки 📸 (необязательно)",
+      photoKeyboard
     );
     return ctx.wizard.next();
   },
-  // Шаг 8: Завершение регистрации
-  // Шаг 8: Завершение регистрации
+
+  // Шаг 7: Фото собаки
   async (ctx) => {
     try {
       const userData = ctx.wizard.state.userData || {};
@@ -424,51 +612,48 @@ const registerScene = new Scenes.WizardScene(
       // Обработка callback для пропуска фото
       if (ctx.callbackQuery && ctx.callbackQuery.data === "skip_photo") {
         await ctx.answerCbQuery();
+
+        // Завершаем регистрацию
+        await finishRegistration(ctx);
+        return ctx.scene.leave();
       }
       // Обработка отправки фото
       else if (ctx.message && ctx.message.photo) {
         const photoId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
         userData.dogPhotoId = photoId;
+
+        // Завершаем регистрацию
+        await finishRegistration(ctx);
+        return ctx.scene.leave();
       }
 
-      // Устанавливаем дефолтные значения для всех отсутствующих полей
-      userData.name = userData.name || "Не указано";
-      userData.city = userData.city || "Не указан";
-      userData.dogName = userData.dogName || "Не указано";
-      userData.dogBreed = userData.dogBreed || "Не указана";
-      userData.dogSize = userData.dogSize || "Не указана";
-      userData.dogAge = userData.dogAge || "Не указана";
+      // Если пользователь отправил что-то, но не фото
+      else if (ctx.message) {
+        // Удаляем сообщение пользователя
+        try {
+          await ctx.deleteMessage(ctx.message.message_id);
+        } catch (error) {
+          console.log("Не удалось удалить сообщение пользователя");
+        }
 
-      // Сохраняем данные пользователя в базу данных
-      const user = {
-        id: ctx.from.id,
-        username: ctx.from.username || null,
-        name: userData.name,
-        city: userData.city,
-        location: userData.location || null,
-        dog: {
-          name: userData.dogName,
-          breed: userData.dogBreed,
-          size: userData.dogSize,
-          age: userData.dogAge,
-          photoId: userData.dogPhotoId || null,
-        },
-        createdAt: new Date(),
-      };
+        // Напоминаем о необходимости загрузить фото или пропустить
+        await updateWizardMessage(
+          ctx,
+          "Пожалуйста, загрузите фото вашей собаки или нажмите 'Пропустить'",
+          {
+            inline_keyboard: [
+              [{ text: "Пропустить ⏭️", callback_data: "skip_photo" }],
+            ],
+          }
+        );
+        return;
+      }
 
-      await db.collection("users").doc(String(ctx.from.id)).set(user);
-
-      // Возвращаемся в главное меню
-      await ctx.reply(
-        "✅ Профиль создан! Теперь вы можете создавать прогулки или присоединяться к другим.",
-        { reply_markup: getMainMenuKeyboard() }
-      );
-
-      return ctx.scene.leave();
+      return;
     } catch (error) {
-      console.error("Ошибка при завершении регистрации:", error);
+      console.error("Ошибка при обработке фото:", error);
       await ctx.reply(
-        "Произошла ошибка при регистрации. Попробуйте снова.",
+        "Произошла ошибка при загрузке фото. Попробуйте снова.",
         Markup.removeKeyboard()
       );
       return ctx.scene.leave();
@@ -2248,6 +2433,53 @@ async function findWalksNearby(ctx, latitude, longitude, maxDistance = 3) {
   }
 }
 
+// Вспомогательная функция для завершения регистрации
+async function finishRegistration(ctx) {
+  try {
+    const userData = ctx.wizard.state.userData || {};
+
+    // Устанавливаем дефолтные значения для всех отсутствующих полей
+    userData.name = userData.name || "Не указано";
+    userData.city = userData.city || "Не указан";
+    userData.dogName = userData.dogName || "Не указано";
+    userData.dogBreed = userData.dogBreed || "Не указана";
+    userData.dogSize = userData.dogSize || "Не указана";
+    userData.dogAge = userData.dogAge || "Не указана";
+
+    // Сохраняем данные пользователя в базу данных
+    const user = {
+      id: ctx.from.id,
+      username: ctx.from.username || null,
+      name: userData.name,
+      city: userData.city,
+      location: userData.location || null,
+      dog: {
+        name: userData.dogName,
+        breed: userData.dogBreed,
+        size: userData.dogSize,
+        age: userData.dogAge,
+        photoId: userData.dogPhotoId || null,
+      },
+      createdAt: new Date(),
+    };
+
+    await db.collection("users").doc(String(ctx.from.id)).set(user);
+
+    // Отправляем завершающее сообщение
+    await updateWizardMessage(
+      ctx,
+      "✅ Профиль создан! Теперь вы можете создавать прогулки или присоединяться к другим.",
+      getMainMenuKeyboard()
+    );
+  } catch (error) {
+    console.error("Ошибка при завершении регистрации:", error);
+    await ctx.reply(
+      "Произошла ошибка при регистрации. Попробуйте снова.",
+      Markup.removeKeyboard()
+    );
+  }
+}
+
 // Добавить эту функцию перед определением сцен редактирования прогулки
 async function initWalkEditScene(ctx, sceneName) {
   try {
@@ -3374,22 +3606,77 @@ async function showProfile(ctx) {
   }
 }
 
-// Функция отображения списка прогулок
-// Заменить функцию showWalksList на эту оптимизированную версию
+// Оптимизированная функция для отображения списка прогулок
 async function showWalksList(ctx, walkDocs) {
-  for (const walkDoc of walkDocs) {
-    const walk = walkDoc.data();
-    const isOwn = walk.organizer.id == ctx.from.id;
+  const groupSize = 3; // Группируем по 3 прогулки
 
-    const walkPreview = formatWalkInfo(walk, isOwn);
+  for (let i = 0; i < walkDocs.length; i += groupSize) {
+    const chunk = walkDocs.slice(i, i + groupSize);
+    let messageText = "";
+    const keyboard = [];
 
-    await ctx.reply(
-      walkPreview,
-      Markup.inlineKeyboard([
-        [Markup.button.callback("Подробнее", `walk_details_${walkDoc.id}`)],
-      ])
-    );
+    for (let j = 0; j < chunk.length; j++) {
+      const walkDoc = chunk[j];
+      const walk = walkDoc.data();
+      const isOwn = walk.organizer.id == ctx.from.id;
+      const walkNum = i + j + 1;
+
+      // Добавляем информацию о прогулке с номером
+      messageText += `<b>🐕 Прогулка ${walkNum}</b>\n`;
+      messageText += formatWalkInfo(walk, isOwn);
+
+      // Добавляем разделитель между прогулками
+      if (j < chunk.length - 1) {
+        messageText += "\n\n" + "─────────────────\n\n";
+      }
+
+      // Добавляем кнопку для прогулки
+      keyboard.push([
+        Markup.button.callback(
+          `Подробнее о прогулке ${walkNum}`,
+          `walk_details_${walkDoc.id}`
+        ),
+      ]);
+    }
+
+    // Отправляем одно сообщение с группой прогулок
+    await ctx.reply(messageText, {
+      parse_mode: "HTML",
+      reply_markup: { inline_keyboard: keyboard },
+    });
   }
+}
+
+// Функция для обновления сообщения вместо отправки нового
+async function updateWizardMessage(ctx, text, keyboard = null) {
+  try {
+    // Если есть сохраненный ID сообщения, обновляем его
+    if (ctx.wizard.state.messageId) {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        ctx.wizard.state.messageId,
+        null,
+        text,
+        {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        }
+      );
+      return true;
+    }
+  } catch (error) {
+    console.error("Ошибка при обновлении сообщения:", error);
+  }
+
+  // Если не удалось обновить, отправляем новое сообщение
+  const msg = await ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: keyboard,
+  });
+
+  // Сохраняем ID для будущих обновлений
+  ctx.wizard.state.messageId = msg.message_id;
+  return false;
 }
 
 // Функция для проверки валидности строковых данных
