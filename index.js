@@ -1109,9 +1109,9 @@ const createWalkScene = new Scenes.WizardScene(
 const editProfileMenuScene = new Scenes.BaseScene("editProfileMenu");
 
 editProfileMenuScene.enter(async (ctx) => {
-  await ctx.reply(
-    "Что вы хотите изменить?",
-    Markup.inlineKeyboard([
+  const menuText = "Что вы хотите изменить?";
+  const keyboard = {
+    inline_keyboard: [
       [
         { text: "📝 Имя", callback_data: "edit_name" },
         { text: "🏙 Город", callback_data: "edit_city" },
@@ -1126,41 +1126,161 @@ editProfileMenuScene.enter(async (ctx) => {
       ],
       [{ text: "📸 Фото собаки", callback_data: "edit_dog_photo" }],
       [{ text: "↩️ Вернуться в профиль", callback_data: "my_profile" }],
-    ])
-  );
+    ],
+  };
+
+  await updateWizardMessage(ctx, menuText, keyboard);
 });
 
-// Сцена редактирования имени
-// Сцена редактирования имени
+// Обновленная сцена редактирования имени
 const editNameScene = new Scenes.WizardScene(
   "editName",
   // Шаг 1: Ввод нового имени
-  (ctx) => {
-    ctx.reply("Введите ваше новое имя:", Markup.removeKeyboard());
-    return ctx.wizard.next();
+  async (ctx) => {
+    try {
+      const promptText = "Введите ваше новое имя:";
+
+      // Если есть ID последнего сообщения, редактируем его
+      if (ctx.session && ctx.session.lastMessageId) {
+        try {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            ctx.session.lastMessageId,
+            null,
+            promptText,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+                ],
+              },
+            }
+          );
+        } catch (error) {
+          console.error("Ошибка при редактировании сообщения:", error);
+          // Если не удалось отредактировать, отправим новое
+          const msg = await ctx.reply(promptText, {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+              ],
+            },
+          });
+
+          // Обновляем ID последнего сообщения
+          ctx.session.lastMessageId = msg.message_id;
+        }
+      } else {
+        // Отправляем новое сообщение
+        const msg = await ctx.reply(promptText, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+            ],
+          },
+        });
+
+        // Сохраняем ID для будущих редактирований
+        if (!ctx.session) ctx.session = {};
+        ctx.session.lastMessageId = msg.message_id;
+      }
+
+      return ctx.wizard.next();
+    } catch (error) {
+      console.error("Ошибка при запросе нового имени:", error);
+      await ctx.reply("Произошла ошибка. Попробуйте снова.");
+      return ctx.scene.enter("editProfileMenu");
+    }
   },
+
   // Шаг 2: Сохранение нового имени
   async (ctx) => {
     try {
+      // Проверяем, не была ли нажата кнопка отмены
+      if (ctx.callbackQuery && ctx.callbackQuery.data === "cancel_edit") {
+        await ctx.answerCbQuery();
+        return ctx.scene.enter("editProfileMenu");
+      }
+
       if (!ctx.message || !ctx.message.text) {
-        await ctx.reply("Пожалуйста, введите корректное имя:");
+        // Если это не текстовое сообщение, просим ввести имя еще раз
+        if (ctx.session && ctx.session.lastMessageId) {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            ctx.session.lastMessageId,
+            null,
+            "Пожалуйста, введите корректное имя текстом:",
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+                ],
+              },
+            }
+          );
+        } else {
+          await ctx.reply("Пожалуйста, введите корректное имя текстом:");
+        }
         return; // Остаемся на том же шаге
       }
 
       const newName = ctx.message.text;
 
-      // Проверяем валидность имени прямо здесь
+      // Проверяем валидность имени
       if (!isValidString(newName)) {
-        await ctx.reply("Пожалуйста, введите корректное имя:");
+        if (ctx.session && ctx.session.lastMessageId) {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            ctx.session.lastMessageId,
+            null,
+            "Имя не может быть пустым или 'null'. Пожалуйста, введите корректное имя:",
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+                ],
+              },
+            }
+          );
+        } else {
+          await ctx.reply(
+            "Имя не может быть пустым или 'null'. Пожалуйста, введите корректное имя:"
+          );
+        }
         return; // Остаемся на том же шаге для повторного ввода
       }
 
+      // Обновляем имя в базе данных
       await db.collection("users").doc(String(ctx.from.id)).update({
         name: newName,
       });
 
-      await ctx.reply("✅ Имя успешно изменено!");
-      return ctx.scene.enter("editProfileMenu");
+      // Удаляем сообщение с введенным пользователем именем
+      try {
+        await ctx.deleteMessage(ctx.message.message_id);
+      } catch (error) {
+        console.log("Не удалось удалить сообщение пользователя:", error);
+      }
+
+      // Редактируем сообщение с подтверждением
+      if (ctx.session && ctx.session.lastMessageId) {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          ctx.session.lastMessageId,
+          null,
+          "✅ Имя успешно изменено!",
+          { reply_markup: { inline_keyboard: [] } }
+        );
+      } else {
+        await ctx.reply("✅ Имя успешно изменено!");
+      }
+
+      // Возвращаемся в меню редактирования
+      setTimeout(() => {
+        ctx.scene.enter("editProfileMenu");
+      }, 1500);
+
+      return;
     } catch (error) {
       console.error("Ошибка при обновлении имени:", error);
       await ctx.reply("Произошла ошибка. Попробуйте еще раз.");
@@ -1169,7 +1289,8 @@ const editNameScene = new Scenes.WizardScene(
   }
 );
 
-// Сцена редактирования города
+// Обновленная сцена редактирования города
+
 const editCityScene = new Scenes.WizardScene(
   "editCity",
   // Шаг 1: Выбор города
@@ -1184,12 +1305,6 @@ const editCityScene = new Scenes.WizardScene(
           {
             text: "📍 Моё текущее местоположение",
             callback_data: "current_location",
-          },
-        ],
-        [
-          {
-            text: "📌 Выбрать место на карте",
-            callback_data: "choose_map_location",
           },
         ],
         [{ text: "↩️ Отмена", callback_data: "cancel_edit" }],
@@ -1222,16 +1337,6 @@ const editCityScene = new Scenes.WizardScene(
           );
           ctx.wizard.state.waitingForCurrentLocation = true;
           return;
-        } else if (data === "choose_map_location") {
-          // Показываем кнопку для выбора места на карте
-          await ctx.reply(
-            "Выберите место на карте и отправьте:",
-            Markup.keyboard([
-              [Markup.button.locationRequest("📍 Выбрать место на карте")],
-            ]).resize()
-          );
-          ctx.wizard.state.waitingForMapLocation = true;
-          return;
         } else if (data.startsWith("city_")) {
           const city = data.replace("city_", "");
           await db.collection("users").doc(String(ctx.from.id)).update({
@@ -1243,7 +1348,13 @@ const editCityScene = new Scenes.WizardScene(
           await ctx.reply("✅ Город успешно изменен!", {
             reply_markup: { remove_keyboard: true },
           });
-          return ctx.scene.enter("editProfileMenu");
+
+          // После успешного изменения города показываем главное меню
+          await ctx.reply("Главное меню:", {
+            reply_markup: getMainMenuKeyboard(),
+          });
+
+          return ctx.scene.leave(); // Выходим из сцены полностью
         }
       }
       // Обработка геолокации
@@ -1274,7 +1385,13 @@ const editCityScene = new Scenes.WizardScene(
         await ctx.reply("✅ Местоположение успешно сохранено!", {
           reply_markup: { remove_keyboard: true },
         });
-        return ctx.scene.enter("editProfileMenu");
+
+        // После успешного сохранения местоположения показываем главное меню
+        await ctx.reply("Главное меню:", {
+          reply_markup: getMainMenuKeyboard(),
+        });
+
+        return ctx.scene.leave(); // Выходим из сцены полностью
       }
       // Обработка текстового ввода города
       else if (ctx.message && ctx.message.text) {
@@ -1294,30 +1411,60 @@ const editCityScene = new Scenes.WizardScene(
         await ctx.reply("✅ Город успешно изменен!", {
           reply_markup: { remove_keyboard: true },
         });
-        return ctx.scene.enter("editProfileMenu");
+
+        // После успешного изменения города показываем главное меню
+        await ctx.reply("Главное меню:", {
+          reply_markup: getMainMenuKeyboard(),
+        });
+
+        return ctx.scene.leave(); // Выходим из сцены полностью
       }
     } catch (error) {
       console.error("Ошибка при редактировании города:", error);
       await ctx.reply("Произошла ошибка. Попробуйте снова.", {
         reply_markup: { remove_keyboard: true },
       });
-      return ctx.scene.enter("editProfileMenu");
+
+      // При ошибке тоже возвращаемся в главное меню
+      await ctx.reply("Главное меню:", {
+        reply_markup: getMainMenuKeyboard(),
+      });
+
+      return ctx.scene.leave();
     }
   }
 );
+
+// Сцена редактирования имени собаки
 // Сцена редактирования имени собаки
 const editDogNameScene = new Scenes.WizardScene(
   "editDogName",
   // Шаг 1: Ввод нового имени собаки
-  (ctx) => {
-    ctx.reply("Введите новое имя собаки:", Markup.removeKeyboard());
+  async (ctx) => {
+    await updateWizardMessage(ctx, "Введите новое имя собаки:", {
+      inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel_edit" }]],
+    });
     return ctx.wizard.next();
   },
   // Шаг 2: Сохранение имени собаки
   async (ctx) => {
     try {
+      // Проверяем, не была ли нажата кнопка отмены
+      if (ctx.callbackQuery && ctx.callbackQuery.data === "cancel_edit") {
+        await ctx.answerCbQuery();
+        return ctx.scene.enter("editProfileMenu");
+      }
+
       if (!ctx.message || !ctx.message.text) {
-        await ctx.reply("Пожалуйста, введите имя собаки текстом.");
+        await updateWizardMessage(
+          ctx,
+          "Пожалуйста, введите имя собаки текстом:",
+          {
+            inline_keyboard: [
+              [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+            ],
+          }
+        );
         return; // Остаемся на том же шаге
       }
 
@@ -1325,38 +1472,59 @@ const editDogNameScene = new Scenes.WizardScene(
 
       // Проверяем валидность имени собаки
       if (!isValidString(newDogName)) {
-        await ctx.reply(
-          "Имя собаки не может быть пустым или 'null'. Пожалуйста, введите корректное имя:"
+        await updateWizardMessage(
+          ctx,
+          "Имя собаки не может быть пустым или 'null'. Пожалуйста, введите корректное имя:",
+          {
+            inline_keyboard: [
+              [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+            ],
+          }
         );
         return; // Остаемся на том же шаге для повторного ввода
       }
 
+      // Удаляем сообщение пользователя для поддержания "матрешки"
+      try {
+        await ctx.deleteMessage(ctx.message.message_id);
+      } catch (error) {
+        console.log("Не удалось удалить сообщение пользователя:", error);
+      }
+
+      // Обновляем имя собаки в базе данных
       await db.collection("users").doc(String(ctx.from.id)).update({
         "dog.name": newDogName,
       });
 
-      await ctx.reply("✅ Имя собаки успешно изменено!");
-      return ctx.scene.enter("editProfileMenu");
+      // Сообщаем об успехе и возвращаемся в меню
+      await updateWizardMessage(ctx, "✅ Имя собаки успешно изменено!");
+
+      // Добавляем небольшую задержку перед возвратом в меню
+      setTimeout(() => {
+        ctx.scene.enter("editProfileMenu");
+      }, 1500);
     } catch (error) {
       console.error("Ошибка при редактировании имени собаки:", error);
-      await ctx.reply("Произошла ошибка. Попробуйте снова.");
-      return ctx.scene.enter("editProfileMenu");
+      await updateWizardMessage(ctx, "Произошла ошибка. Попробуйте снова.");
+      setTimeout(() => {
+        ctx.scene.enter("editProfileMenu");
+      }, 1500);
     }
   }
 );
+
 // Сцена редактирования породы собаки
 const editDogBreedScene = new Scenes.WizardScene(
   "editDogBreed",
   // Шаг 1: Выбор породы
-  (ctx) => {
-    ctx.reply(
-      "Выберите новую породу:",
-      Markup.inlineKeyboard(
-        POPULAR_BREEDS.map((breed) => [
-          { text: breed, callback_data: `breed_${breed}` },
-        ]).concat([[{ text: "❌ Отмена", callback_data: "cancel_edit" }]])
-      )
-    );
+  async (ctx) => {
+    const keyboard = {
+      inline_keyboard: POPULAR_BREEDS.map((breed) => [
+        { text: breed, callback_data: `breed_${breed}` },
+      ]).concat([[{ text: "❌ Отмена", callback_data: "cancel_edit" }]]),
+    };
+
+    await updateWizardMessage(ctx, "Выберите новую породу:", keyboard);
     return ctx.wizard.next();
   },
   // Шаг 2: Обработка выбора породы
@@ -1368,16 +1536,16 @@ const editDogBreedScene = new Scenes.WizardScene(
         await ctx.answerCbQuery();
 
         if (data === "cancel_edit") {
-          await ctx.reply("Редактирование отменено");
           return ctx.scene.enter("editProfileMenu");
         } else if (data.startsWith("breed_")) {
           const breed = data.replace("breed_", "");
 
           if (breed === "Другая (ввести текстом)") {
-            await ctx.reply(
-              "Введите породу вашей собаки:",
-              Markup.removeKeyboard()
-            );
+            await updateWizardMessage(ctx, "Введите породу вашей собаки:", {
+              inline_keyboard: [
+                [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+              ],
+            });
             ctx.wizard.state.waitingForCustomBreed = true;
             return;
           } else {
@@ -1385,16 +1553,28 @@ const editDogBreedScene = new Scenes.WizardScene(
               "dog.breed": breed,
             });
 
-            await ctx.reply("✅ Порода собаки успешно изменена!");
-            return ctx.scene.enter("editProfileMenu");
+            await updateWizardMessage(
+              ctx,
+              "✅ Порода собаки успешно изменена!"
+            );
+            setTimeout(() => {
+              ctx.scene.enter("editProfileMenu");
+            }, 1500);
+            return;
           }
         }
       }
       // Обработка текстового ввода породы
       else if (ctx.message && ctx.message.text) {
         if (ctx.message.text === "❌ Отмена") {
-          await ctx.reply("Редактирование отменено");
           return ctx.scene.enter("editProfileMenu");
+        }
+
+        // Удаляем сообщение пользователя
+        try {
+          await ctx.deleteMessage(ctx.message.message_id);
+        } catch (error) {
+          console.log("Не удалось удалить сообщение пользователя:", error);
         }
 
         if (ctx.wizard.state.waitingForCustomBreed) {
@@ -1402,39 +1582,44 @@ const editDogBreedScene = new Scenes.WizardScene(
             "dog.breed": ctx.message.text,
           });
 
-          await ctx.reply("✅ Порода собаки успешно изменена!");
+          await updateWizardMessage(ctx, "✅ Порода собаки успешно изменена!");
         } else {
           await db.collection("users").doc(String(ctx.from.id)).update({
             "dog.breed": ctx.message.text,
           });
 
-          await ctx.reply("✅ Порода собаки успешно изменена!");
+          await updateWizardMessage(ctx, "✅ Порода собаки успешно изменена!");
         }
 
-        return ctx.scene.enter("editProfileMenu");
+        setTimeout(() => {
+          ctx.scene.enter("editProfileMenu");
+        }, 1500);
+        return;
       }
     } catch (error) {
       console.error("Ошибка при редактировании породы собаки:", error);
-      await ctx.reply("Произошла ошибка. Попробуйте снова.");
-      return ctx.scene.enter("editProfileMenu");
+      await updateWizardMessage(ctx, "Произошла ошибка. Попробуйте снова.");
+      setTimeout(() => {
+        ctx.scene.enter("editProfileMenu");
+      }, 1500);
     }
   }
 );
-
 // Сцена редактирования размера собаки
 const editDogSizeScene = new Scenes.WizardScene(
   "editDogSize",
   // Шаг 1: Выбор размера
-  (ctx) => {
-    ctx.reply(
-      "Выберите новый размер собаки:",
-      Markup.inlineKeyboard([
-        [{ text: "Маленькая", callback_data: "size_small" }],
-        [{ text: "Средняя", callback_data: "size_medium" }],
-        [{ text: "Большая", callback_data: "size_large" }],
+  async (ctx) => {
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
+        [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
+        [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
         [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
-      ])
-    );
+      ],
+    };
+
+    await updateWizardMessage(ctx, "Выберите новый размер собаки:", keyboard);
     return ctx.wizard.next();
   },
   // Шаг 2: Сохранение размера
@@ -1446,76 +1631,51 @@ const editDogSizeScene = new Scenes.WizardScene(
         await ctx.answerCbQuery();
 
         if (data === "cancel_edit") {
-          await ctx.reply("Редактирование отменено");
           return ctx.scene.enter("editProfileMenu");
-        } else if (data === "size_small") {
+        } else if (
+          data === "size_small" ||
+          data === "size_medium" ||
+          data === "size_large"
+        ) {
+          const size = data.replace("size_", "");
+
           await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.size": "small",
+            "dog.size": size,
           });
 
-          await ctx.reply("✅ Размер собаки успешно изменен!");
-          return ctx.scene.enter("editProfileMenu");
-        } else if (data === "size_medium") {
-          await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.size": "medium",
-          });
-
-          await ctx.reply("✅ Размер собаки успешно изменен!");
-          return ctx.scene.enter("editProfileMenu");
-        } else if (data === "size_large") {
-          await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.size": "large",
-          });
-
-          await ctx.reply("✅ Размер собаки успешно изменен!");
-          return ctx.scene.enter("editProfileMenu");
+          await updateWizardMessage(ctx, "✅ Размер собаки успешно изменен!");
+          setTimeout(() => {
+            ctx.scene.enter("editProfileMenu");
+          }, 1500);
+          return;
         }
-      }
-      // Обработка текстового ввода
-      else if (ctx.message && ctx.message.text) {
-        if (ctx.message.text === "↩️ Отмена") {
-          await ctx.reply("Редактирование отменено");
-          return ctx.scene.enter("editProfileMenu");
-        }
-
-        const size = Object.values(DOG_SIZES).find((size) =>
-          size.text.includes(ctx.message.text)
-        );
-
-        if (size) {
-          await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.size": size.value,
-          });
-
-          await ctx.reply("✅ Размер собаки успешно изменен!");
-        } else {
-          await ctx.reply("❌ Неверный выбор. Попробуйте еще раз.");
-        }
-
-        return ctx.scene.enter("editProfileMenu");
       }
     } catch (error) {
       console.error("Ошибка при редактировании размера собаки:", error);
-      await ctx.reply("Произошла ошибка. Попробуйте снова.");
-      return ctx.scene.enter("editProfileMenu");
+      await updateWizardMessage(ctx, "Произошла ошибка. Попробуйте снова.");
+      setTimeout(() => {
+        ctx.scene.enter("editProfileMenu");
+      }, 1500);
     }
   }
 );
+
 // Сцена редактирования возраста собаки
 const editDogAgeScene = new Scenes.WizardScene(
   "editDogAge",
   // Шаг 1: Выбор возраста
-  (ctx) => {
-    ctx.reply(
-      "Выберите новый возраст собаки:",
-      Markup.inlineKeyboard([
+  async (ctx) => {
+    const keyboard = {
+      inline_keyboard: [
         [{ text: DOG_AGES.PUPPY.text, callback_data: "age_puppy" }],
         [{ text: DOG_AGES.YOUNG.text, callback_data: "age_young" }],
         [{ text: DOG_AGES.ADULT.text, callback_data: "age_adult" }],
         [{ text: DOG_AGES.SENIOR.text, callback_data: "age_senior" }],
         [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
-      ])
-    );
+      ],
+    };
+
+    await updateWizardMessage(ctx, "Выберите новый возраст собаки:", keyboard);
     return ctx.wizard.next();
   },
   // Шаг 2: Сохранение возраста
@@ -1527,65 +1687,27 @@ const editDogAgeScene = new Scenes.WizardScene(
         await ctx.answerCbQuery();
 
         if (data === "cancel_edit") {
-          await ctx.reply("Редактирование отменено");
           return ctx.scene.enter("editProfileMenu");
-        } else if (data === "age_puppy") {
+        } else if (data.startsWith("age_")) {
+          const age = data.replace("age_", "");
+
           await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.age": "puppy",
+            "dog.age": age,
           });
 
-          await ctx.reply("✅ Возраст собаки успешно изменен!");
-          return ctx.scene.enter("editProfileMenu");
-        } else if (data === "age_young") {
-          await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.age": "young",
-          });
-
-          await ctx.reply("✅ Возраст собаки успешно изменен!");
-          return ctx.scene.enter("editProfileMenu");
-        } else if (data === "age_adult") {
-          await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.age": "adult",
-          });
-
-          await ctx.reply("✅ Возраст собаки успешно изменен!");
-          return ctx.scene.enter("editProfileMenu");
-        } else if (data === "age_senior") {
-          await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.age": "senior",
-          });
-
-          await ctx.reply("✅ Возраст собаки успешно изменен!");
-          return ctx.scene.enter("editProfileMenu");
+          await updateWizardMessage(ctx, "✅ Возраст собаки успешно изменен!");
+          setTimeout(() => {
+            ctx.scene.enter("editProfileMenu");
+          }, 1500);
+          return;
         }
-      }
-      // Обработка текстового ввода
-      else if (ctx.message && ctx.message.text) {
-        if (ctx.message.text === "❌ Отмена") {
-          await ctx.reply("Редактирование отменено");
-          return ctx.scene.enter("editProfileMenu");
-        }
-
-        const age = Object.values(DOG_AGES).find((age) =>
-          age.text.includes(ctx.message.text)
-        );
-
-        if (age) {
-          await db.collection("users").doc(String(ctx.from.id)).update({
-            "dog.age": age.value,
-          });
-
-          await ctx.reply("✅ Возраст собаки успешно изменен!");
-        } else {
-          await ctx.reply("❌ Неверный выбор. Попробуйте еще раз.");
-        }
-
-        return ctx.scene.enter("editProfileMenu");
       }
     } catch (error) {
       console.error("Ошибка при редактировании возраста собаки:", error);
-      await ctx.reply("Произошла ошибка. Попробуйте снова.");
-      return ctx.scene.enter("editProfileMenu");
+      await updateWizardMessage(ctx, "Произошла ошибка. Попробуйте снова.");
+      setTimeout(() => {
+        ctx.scene.enter("editProfileMenu");
+      }, 1500);
     }
   }
 );
@@ -1593,13 +1715,10 @@ const editDogAgeScene = new Scenes.WizardScene(
 const editDogPhotoScene = new Scenes.WizardScene(
   "editDogPhoto",
   // Шаг 1: Запрос фото
-  (ctx) => {
-    ctx.reply(
-      "Отправьте новое фото вашей собаки 📸",
-      Markup.inlineKeyboard([
-        [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
-      ])
-    );
+  async (ctx) => {
+    await updateWizardMessage(ctx, "Отправьте новое фото вашей собаки 📸", {
+      inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel_edit" }]],
+    });
     return ctx.wizard.next();
   },
   // Шаг 2: Сохранение фото
@@ -1611,7 +1730,6 @@ const editDogPhotoScene = new Scenes.WizardScene(
         await ctx.answerCbQuery();
 
         if (data === "cancel_edit") {
-          await ctx.reply("Редактирование отменено");
           return ctx.scene.enter("editProfileMenu");
         }
       }
@@ -1619,31 +1737,49 @@ const editDogPhotoScene = new Scenes.WizardScene(
       else if (ctx.message && ctx.message.photo) {
         const photoId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
 
+        // Удаляем сообщение с фото (опционально)
+        try {
+          await ctx.deleteMessage(ctx.message.message_id);
+        } catch (error) {
+          console.log("Не удалось удалить сообщение с фото:", error);
+        }
+
         await db.collection("users").doc(String(ctx.from.id)).update({
           "dog.photoId": photoId,
         });
 
-        await ctx.reply("✅ Фото собаки успешно обновлено!");
-        return ctx.scene.enter("editProfileMenu");
+        await updateWizardMessage(ctx, "✅ Фото собаки успешно обновлено!");
+        setTimeout(() => {
+          ctx.scene.enter("editProfileMenu");
+        }, 1500);
+        return;
       }
       // Обработка текстовых сообщений
       else if (ctx.message && ctx.message.text) {
         if (ctx.message.text === "❌ Отмена") {
-          await ctx.reply("Редактирование отменено");
           return ctx.scene.enter("editProfileMenu");
         } else {
-          await ctx.reply(
-            "Пожалуйста, отправьте фото собаки или нажмите 'Отмена'."
+          await updateWizardMessage(
+            ctx,
+            "Пожалуйста, отправьте фото собаки или нажмите 'Отмена'.",
+            {
+              inline_keyboard: [
+                [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+              ],
+            }
           );
         }
       }
     } catch (error) {
       console.error("Ошибка при редактировании фото собаки:", error);
-      await ctx.reply("Произошла ошибка. Попробуйте снова.");
-      return ctx.scene.enter("editProfileMenu");
+      await updateWizardMessage(ctx, "Произошла ошибка. Попробуйте снова.");
+      setTimeout(() => {
+        ctx.scene.enter("editProfileMenu");
+      }, 1500);
     }
   }
 );
+
 // Сцена выбора параметра для редактирования прогулки
 const editWalkMenuScene = new Scenes.BaseScene("editWalkMenu");
 
@@ -3068,8 +3204,7 @@ bot.action("cancel_walk", async (ctx) => {
   }
 });
 
-// Главное меню
-// Оригинальная функция для инлайновых кнопок (сохраняем как есть)
+// Обработчик для главного меню
 function getMainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -3114,59 +3249,169 @@ function getWalkFiltersKeyboard() {
 }
 
 bot.action("my_profile", async (ctx) => {
-  // Сразу отвечаем на callback, прежде чем делать какие-либо операции с БД
   try {
     await ctx.answerCbQuery();
-  } catch (error) {
-    console.log("Не удалось ответить на callback запрос:", error.message);
-    // Продолжаем выполнение обработчика, даже если answerCbQuery не удался
-  }
 
-  // Затем выполняем остальные операции
-  try {
-    await showProfile(ctx);
-  } catch (error) {
-    console.error("Ошибка при показе профиля:", error);
-    await ctx.reply(
-      "Произошла ошибка при загрузке профиля. Попробуйте еще раз.",
-      {
-        reply_markup: getMainMenuKeyboard(),
+    // Получаем ID сообщения из callback-запроса
+    const messageId =
+      ctx.callbackQuery && ctx.callbackQuery.message
+        ? ctx.callbackQuery.message.message_id
+        : ctx.session
+          ? ctx.session.lastMessageId
+          : null;
+
+    // Сохраняем ID сообщения для будущих обновлений
+    if (!ctx.session) ctx.session = {};
+    ctx.session.lastMessageId = messageId;
+
+    const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
+
+    if (!userDoc.exists) {
+      return await ctx.reply(
+        "Ваш профиль не найден. Пожалуйста, пройдите регистрацию.",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Создать профиль", callback_data: "create_profile" }],
+            ],
+          },
+        }
+      );
+    }
+
+    const userData = userDoc.data();
+
+    const profileText = `
+👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
+📍 Город: ${userData.city}
+🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+    `;
+
+    // Добавляем невидимый маркер к тексту, чтобы избежать ошибки "message is not modified"
+    const uniqueMarker = `\u200B${Date.now().toString().slice(-5)}`;
+    const modifiedText = profileText + uniqueMarker;
+
+    // Пытаемся редактировать сообщение напрямую, используя ID из callbackQuery
+    if (messageId) {
+      try {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          messageId,
+          null,
+          modifiedText,
+          {
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "✏️ Редактировать профиль",
+                    callback_data: "edit_profile_menu",
+                  },
+                ],
+                [
+                  {
+                    text: "⬅️ Назад в меню",
+                    callback_data: "back_to_main_menu",
+                  },
+                ],
+              ],
+            },
+          }
+        );
+
+        // Если у собаки есть фото, показываем его отдельным сообщением
+        if (userData.dog && userData.dog.photoId) {
+          // Проверяем, было ли уже отправлено фото в этом контексте
+          if (!ctx.session.dogPhotoShown) {
+            await ctx.replyWithPhoto(userData.dog.photoId);
+            ctx.session.dogPhotoShown = true;
+          }
+        }
+
+        return;
+      } catch (error) {
+        console.log("Не удалось обновить сообщение:", error);
+        // В случае ошибки продолжаем и отправляем новое сообщение
       }
+    }
+
+    // Если редактирование не удалось, отправляем новое сообщение
+    const msg = await ctx.reply(profileText, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "✏️ Редактировать профиль",
+              callback_data: "edit_profile_menu",
+            },
+          ],
+          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+        ],
+      },
+    });
+
+    // Сохраняем ID нового сообщения
+    ctx.session.lastMessageId = msg.message_id;
+
+    // Если у собаки есть фото, показываем его отдельным сообщением
+    if (userData.dog && userData.dog.photoId) {
+      await ctx.replyWithPhoto(userData.dog.photoId);
+      ctx.session.dogPhotoShown = true;
+    }
+  } catch (error) {
+    console.error("Ошибка при отображении профиля:", error);
+    await ctx.reply(
+      "Произошла ошибка при загрузке профиля. Попробуйте еще раз."
     );
   }
 });
 
 bot.action("back_to_main_menu", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply("Главное меню", { reply_markup: getMainMenuKeyboard() });
+  const menuText = "Главное меню";
+  await updateWizardMessage(ctx, menuText, getMainMenuKeyboard());
 });
-
 // Редактирование профиля
 bot.action("edit_profile_menu", async (ctx) => {
   await ctx.answerCbQuery();
 
-  await ctx.reply("Что вы хотите изменить?", {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "📝 Имя", callback_data: "edit_name" },
-          { text: "🏙 Город", callback_data: "edit_city" },
-        ],
-        [
-          { text: "🐕 Имя собаки", callback_data: "edit_dog_name" },
-          { text: "🐶 Порода собаки", callback_data: "edit_dog_breed" },
-        ],
-        [
-          { text: "📏 Размер собаки", callback_data: "edit_dog_size" },
-          { text: "🗓 Возраст собаки", callback_data: "edit_dog_age" },
-        ],
-        [{ text: "📸 Фото собаки", callback_data: "edit_dog_photo" }],
-        [{ text: "↩️ Вернуться в профиль", callback_data: "my_profile" }],
-      ],
-    },
-  });
-});
+  // Простой текст без маркеров и цифр
+  const menuText = "Что вы хотите изменить?";
 
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "📝 Имя", callback_data: "edit_name" },
+        { text: "🏙 Город", callback_data: "edit_city" },
+      ],
+      [
+        { text: "🐕 Имя собаки", callback_data: "edit_dog_name" },
+        { text: "🐶 Порода собаки", callback_data: "edit_dog_breed" },
+      ],
+      [
+        { text: "📏 Размер собаки", callback_data: "edit_dog_size" },
+        { text: "🗓 Возраст собаки", callback_data: "edit_dog_age" },
+      ],
+      [{ text: "📸 Фото собаки", callback_data: "edit_dog_photo" }],
+      [{ text: "↩️ Вернуться в профиль", callback_data: "my_profile" }],
+    ],
+  };
+
+  // Пытаемся обновить текущее сообщение
+  try {
+    await ctx.editMessageText(menuText, {
+      reply_markup: keyboard,
+    });
+  } catch (error) {
+    // Если возникла ошибка, отправляем новое сообщение
+    console.log("Ошибка при обновлении сообщения:", error.message);
+    await ctx.reply(menuText, {
+      reply_markup: keyboard,
+    });
+  }
+});
 // Обработчик для поиска в своем городе
 bot.action("search_in_my_city", async (ctx) => {
   try {
@@ -3572,22 +3817,42 @@ async function showProfile(ctx) {
     const userData = userDoc.data();
 
     const profileText = `
-        👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
-        📍 Город: ${userData.city}
-        🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
-        `;
+👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
+📍 Город: ${userData.city}
+🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+    `;
 
-    // Сначала отправляем информацию о профиле
-    if (userData.dog && userData.dog.photoId) {
-      await ctx.replyWithPhoto(userData.dog.photoId, {
-        caption: profileText,
-      });
-    } else {
-      await ctx.reply(profileText);
+    // Если это ответ на callback, пытаемся редактировать сообщение
+    if (ctx.callbackQuery) {
+      try {
+        await ctx.editMessageText(profileText, {
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "✏️ Редактировать профиль",
+                  callback_data: "edit_profile_menu",
+                },
+              ],
+              [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+            ],
+          },
+        });
+
+        // Сохраняем ID сообщения в сессии
+        if (!ctx.session) ctx.session = {};
+        ctx.session.lastMessageId = ctx.callbackQuery.message.message_id;
+        return;
+      } catch (error) {
+        console.log("Не удалось отредактировать сообщение:", error);
+        // Если редактирование не удалось, отправим новое сообщение
+      }
     }
 
-    // Отправляем кнопки
-    await ctx.reply("Выберите действие:", {
+    // Отправляем сообщение (только если не смогли отредактировать)
+    const msg = await ctx.reply(profileText, {
+      parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
           [
@@ -3600,9 +3865,19 @@ async function showProfile(ctx) {
         ],
       },
     });
+
+    // Сохраняем ID сообщения в сессии
+    if (!ctx.session) ctx.session = {};
+    ctx.session.lastMessageId = msg.message_id;
+
+    // Если у собаки есть фото, отправляем его отдельным сообщением
+    // (нельзя преобразовать текстовое сообщение в фото при редактировании)
+    if (userData.dog && userData.dog.photoId) {
+      await ctx.replyWithPhoto(userData.dog.photoId);
+    }
   } catch (error) {
     console.error("Ошибка при отображении профиля:", error);
-    throw error; // Передаем ошибку дальше для обработки в вызывающей функции
+    throw error;
   }
 }
 
@@ -3650,33 +3925,54 @@ async function showWalksList(ctx, walkDocs) {
 // Функция для обновления сообщения вместо отправки нового
 async function updateWizardMessage(ctx, text, keyboard = null) {
   try {
-    // Если есть сохраненный ID сообщения, обновляем его
-    if (ctx.wizard.state.messageId) {
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        ctx.wizard.state.messageId,
-        null,
-        text,
-        {
+    const modifiedText = text + " ";
+
+    // Проверяем, есть ли сохранённый ID сообщения для обновления
+    if (ctx.session && ctx.session.lastMessageId) {
+      try {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          ctx.session.lastMessageId,
+          null,
+          modifiedText,
+          {
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+          }
+        );
+        return true; // Успешное обновление
+      } catch (error) {
+        console.error("Ошибка при обновлении сообщения:", error);
+        // Если сообщение не найдено (было удалено) или другая ошибка - создаем новое
+        const msg = await ctx.reply(modifiedText, {
           parse_mode: "HTML",
           reply_markup: keyboard,
-        }
-      );
-      return true;
+        });
+
+        // Обновляем ID сообщения
+        ctx.session.lastMessageId = msg.message_id;
+        return false;
+      }
     }
   } catch (error) {
     console.error("Ошибка при обновлении сообщения:", error);
   }
 
-  // Если не удалось обновить, отправляем новое сообщение
-  const msg = await ctx.reply(text, {
-    parse_mode: "HTML",
-    reply_markup: keyboard,
-  });
+  // Если обновить не удалось или нет сохранённого ID, создаём новое сообщение
+  try {
+    const msg = await ctx.reply(text, {
+      parse_mode: "HTML",
+      reply_markup: keyboard,
+    });
 
-  // Сохраняем ID для будущих обновлений
-  ctx.wizard.state.messageId = msg.message_id;
-  return false;
+    // Сохраняем ID сообщения для будущих обновлений
+    if (!ctx.session) ctx.session = {};
+    ctx.session.lastMessageId = msg.message_id;
+    return false; // Создано новое сообщение
+  } catch (error) {
+    console.error("Ошибка при отправке нового сообщения:", error);
+    return false;
+  }
 }
 
 // Функция для проверки валидности строковых данных
@@ -4348,75 +4644,80 @@ cron.schedule("* * * * *", remindAboutWalks);
 // Обработчики для кнопок главного меню
 bot.action("find_walk", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply("Выберите фильтр:", {
-    reply_markup: getWalkFiltersKeyboard(),
-  });
+  await updateWizardMessage(ctx, "Выберите фильтр:", getWalkFiltersKeyboard());
 });
 
 bot.action("create_walk", async (ctx) => {
   await ctx.answerCbQuery();
+  // Сохраняем текущее ID сообщения перед входом в сцену
+  if (ctx.session && ctx.session.lastMessageId) {
+    ctx.session.previousMessageId = ctx.session.lastMessageId;
+  }
   ctx.scene.enter("createWalk");
 });
 
 bot.action("edit_name", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.scene.enter("editName");
+  ctx.scene.enter("editName");
 });
 
 bot.action("edit_city", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.scene.enter("editCity");
+  ctx.scene.enter("editCity");
 });
 
 bot.action("edit_dog_name", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.scene.enter("editDogName");
+  ctx.scene.enter("editDogName");
 });
 
 bot.action("edit_dog_breed", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.scene.enter("editDogBreed");
+  ctx.scene.enter("editDogBreed");
 });
 
 bot.action("edit_dog_size", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.scene.enter("editDogSize");
+  ctx.scene.enter("editDogSize");
 });
 
 bot.action("edit_dog_age", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.scene.enter("editDogAge");
+  ctx.scene.enter("editDogAge");
 });
 
 bot.action("edit_dog_photo", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.scene.enter("editDogPhoto");
+  ctx.scene.enter("editDogPhoto");
 });
 
 bot.action("my_walks", async (ctx) => {
   await ctx.answerCbQuery();
+  // Реализация с использованием updateWizardMessage
   const walksSnapshot = await db
     .collection("walks")
     .where("organizer.id", "==", ctx.from.id)
     .get();
 
   if (walksSnapshot.empty) {
-    ctx.reply("У вас пока нет созданных прогулок.", {
-      reply_markup: getMainMenuKeyboard(),
+    await updateWizardMessage(ctx, "У вас пока нет созданных прогулок.", {
+      inline_keyboard: [
+        [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
+        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+      ],
     });
     return;
   }
 
-  await ctx.reply("Ваши созданные прогулки:");
-
-  // Показываем список прогулок
-  await showWalksList(ctx, walksSnapshot.docs);
-
-  await ctx.reply("Вернуться:", {
-    reply_markup: {
-      inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
-    },
+  // Для прогулок возможно придется отправить новые сообщения, т.к. их может быть много
+  await updateWizardMessage(ctx, "Ваши созданные прогулки:", {
+    inline_keyboard: [
+      [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+    ],
   });
+
+  // Отображаем список прогулок
+  await showWalksList(ctx, walksSnapshot.docs);
 });
 
 bot.action("my_participations", async (ctx) => {
@@ -4970,9 +5271,80 @@ bot.action(/size_(.+)/, async (ctx) => {
   }
 });
 
-bot.action("cancel_edit", (ctx) => {
-  ctx.reply("Редактирование отменено", { reply_markup: getMainMenuKeyboard() });
+bot.action("cancel_edit", async (ctx) => {
+  await ctx.answerCbQuery();
   return ctx.scene.enter("editProfileMenu");
+});
+
+// Обработчики всех кнопок редактирования в меню
+editProfileMenuScene.action("edit_name", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.scene.enter("editName");
+});
+
+editProfileMenuScene.action("edit_city", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.scene.enter("editCity");
+});
+
+editProfileMenuScene.action("edit_dog_name", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.scene.enter("editDogName");
+});
+
+editProfileMenuScene.action("edit_dog_breed", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.scene.enter("editDogBreed");
+});
+
+editProfileMenuScene.action("edit_dog_size", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.scene.enter("editDogSize");
+});
+
+editProfileMenuScene.action("edit_dog_age", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.scene.enter("editDogAge");
+});
+
+editProfileMenuScene.action("edit_dog_photo", async (ctx) => {
+  await ctx.answerCbQuery();
+  return ctx.scene.enter("editDogPhoto");
+});
+
+editProfileMenuScene.action("my_profile", async (ctx) => {
+  await ctx.answerCbQuery();
+  try {
+    // Вернуться к отображению профиля
+    const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
+    const userData = userDoc.data();
+
+    const profileText = `
+👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
+📍 Город: ${userData.city}
+🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+    `;
+
+    const keyboard = {
+      inline_keyboard: [
+        [
+          {
+            text: "✏️ Редактировать профиль",
+            callback_data: "edit_profile_menu",
+          },
+        ],
+        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+      ],
+    };
+
+    await updateWizardMessage(ctx, profileText, keyboard);
+  } catch (error) {
+    console.error("Ошибка при показе профиля:", error);
+    await updateWizardMessage(
+      ctx,
+      "Произошла ошибка при загрузке профиля. Попробуйте еще раз."
+    );
+  }
 });
 
 bot.action("send_location", (ctx) => {
@@ -5189,38 +5561,45 @@ async function migrateParticipantsHistory() {
   }
 }
 
-// Добавляем команду для запуска миграции
 bot.command("start", async (ctx) => {
   // Проверяем, зарегистрирован ли пользователь
   const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
 
   if (userDoc.exists) {
-    // Если пользователь уже зарегистрирован, показываем главное меню
-    ctx.reply(
+    // Отправляем сообщение с главным меню и сохраняем его ID
+    const msg = await ctx.reply(
       `Привет, ${userDoc.data().name || ctx.from.first_name}! С возвращением в DogMeet 🐶`,
       {
-        reply_markup: getPersistentKeyboard(), // Постоянная клавиатура
+        reply_markup: getMainMenuKeyboard(),
       }
     );
 
-    // Дополнительно отправляем инлайновое меню
-    ctx.reply("Выберите действие:", {
-      reply_markup: getMainMenuKeyboard(), // Инлайновые кнопки
-    });
+    // Сохраняем ID сообщения меню
+    if (!ctx.session) ctx.session = {};
+    ctx.session.lastMessageId = msg.message_id;
   } else {
     // Для новых пользователей оставляем только приглашение к регистрации
     const name = ctx.from.first_name || "гость";
-    ctx.reply(
+    const msg = await ctx.reply(
       `Привет, ${name}! DogMeet помогает находить компанию для прогулок с собакой 🐶.\n` +
         "🔹 Находите владельцев собак рядом.\n" +
         "🔹 Создавайте прогулки в один клик.\n" +
         "🔹 Присоединяйтесь к другим участникам.",
-      Markup.inlineKeyboard([
-        [Markup.button.callback("Создать профиль", "create_profile")],
-      ])
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [Markup.button.callback("Создать профиль", "create_profile")],
+          ],
+        },
+      }
     );
+
+    // Сохраняем ID сообщения
+    if (!ctx.session) ctx.session = {};
+    ctx.session.lastMessageId = msg.message_id;
   }
 });
+
 bot
   .launch()
   .then(async () => {
