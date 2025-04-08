@@ -3100,6 +3100,93 @@ async function findWalksNearby(ctx, latitude, longitude, maxDistance = 3) {
   }
 }
 
+// Функция для отображения списка прогулок с пагинацией
+async function showWalksWithPagination(
+  ctx,
+  walks,
+  page = 0,
+  returnCommand = "back_to_main_menu"
+) {
+  // Настройки пагинации
+  const walksPerPage = 3; // Прогулок на странице
+  const totalPages = Math.ceil(walks.length / walksPerPage);
+  const currentPageWalks = walks.slice(
+    page * walksPerPage,
+    (page + 1) * walksPerPage
+  );
+
+  if (walks.length === 0) {
+    return await updateWizardMessage(ctx, "Прогулок не найдено.", {
+      inline_keyboard: [
+        [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
+        [{ text: "⬅️ Назад", callback_data: returnCommand }],
+      ],
+    });
+  }
+
+  // Сначала построим текст для списка прогулок
+  let messageText = `Найдено ${walks.length} прогулок:\n\n`;
+
+  // Добавляем каждую прогулку в сообщение
+  currentPageWalks.forEach((walkDoc, index) => {
+    const walk = walkDoc.data ? walkDoc.data() : walkDoc;
+    const isOwn = walk.organizer && walk.organizer.id == ctx.from.id;
+    messageText += formatWalkInfo(walk, isOwn);
+
+    // Добавляем разделитель между прогулками
+    if (index < currentPageWalks.length - 1) {
+      messageText += "\n\n" + "─────────────────\n\n";
+    }
+  });
+
+  // Добавим информацию о странице
+  messageText += `\n\nСтраница ${page + 1} из ${totalPages}`;
+
+  // Строим клавиатуру для прогулок
+  const keyboard = [];
+
+  // Добавляем кнопки для каждой прогулки
+  currentPageWalks.forEach((walkDoc, index) => {
+    const walkId = walkDoc.id;
+    keyboard.push([
+      {
+        text: `Подробнее о прогулке ${index + 1}`,
+        callback_data: `walk_details_${walkId}`,
+      },
+    ]);
+  });
+
+  // Добавляем кнопки пагинации
+  const paginationRow = [];
+  if (page > 0) {
+    paginationRow.push({
+      text: "◀️ Назад",
+      callback_data: `pagination_${page - 1}_${returnCommand}`,
+    });
+  }
+  if (page < totalPages - 1) {
+    paginationRow.push({
+      text: "Вперёд ▶️",
+      callback_data: `pagination_${page + 1}_${returnCommand}`,
+    });
+  }
+
+  if (paginationRow.length > 0) {
+    keyboard.push(paginationRow);
+  }
+
+  // Добавляем кнопку возврата
+  keyboard.push([{ text: "⬅️ Назад в меню", callback_data: returnCommand }]);
+
+  // Обновляем сообщение
+  await updateWizardMessage(ctx, messageText, { inline_keyboard: keyboard });
+
+  // Сохраняем данные в сессии для пагинации
+  if (!ctx.session) ctx.session = {};
+  ctx.session.lastWalks = walks;
+  ctx.session.lastReturnCommand = returnCommand;
+}
+
 // Вспомогательная функция для завершения регистрации
 async function finishRegistration(ctx) {
   try {
@@ -4068,6 +4155,34 @@ bot.action(/search_city_(.+)/, async (ctx) => {
   }
 });
 
+bot.action(/pagination_(\d+)_(.+)/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+    const page = parseInt(ctx.match[1]);
+    const returnCommand = ctx.match[2];
+
+    // Получаем данные из сессии
+    if (!ctx.session || !ctx.session.lastWalks) {
+      return await ctx.reply("Ошибка навигации. Вернитесь в меню.", {
+        reply_markup: getMainMenuKeyboard(),
+      });
+    }
+
+    // Показываем прогулки с пагинацией
+    await showWalksWithPagination(
+      ctx,
+      ctx.session.lastWalks,
+      page,
+      returnCommand
+    );
+  } catch (error) {
+    console.error("Ошибка пагинации:", error);
+    await ctx.reply("Произошла ошибка. Возврат в главное меню.", {
+      reply_markup: getMainMenuKeyboard(),
+    });
+  }
+});
+
 // Обработчик для приглашения друзей
 bot.action("invite_friends", async (ctx) => {
   try {
@@ -4224,100 +4339,63 @@ bot.action("walks_nearby", async (ctx) => {
     });
   }
 });
+// Обработчик прогулок сегодня
 bot.action("walks_today", async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
 
-  const today = moment().format("DD.MM.YYYY");
-  const walksSnapshot = await db
-    .collection("walks")
-    .where("date", "==", today)
-    .get();
+    const today = moment().format("DD.MM.YYYY");
+    const walksSnapshot = await db
+      .collection("walks")
+      .where("date", "==", today)
+      .get();
 
-  if (walksSnapshot.empty) {
-    await ctx.reply("На сегодня прогулок не найдено.", {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
-          [{ text: "⬅️ Назад", callback_data: "find_walk" }],
-        ],
-      },
-    });
-    return;
-  }
-
-  await ctx.reply("Прогулки на сегодня:");
-
-  await showWalksList(ctx, walksSnapshot.docs);
-
-  await ctx.reply("Вернуться:", {
-    reply_markup: {
+    // Показываем прогулки с пагинацией
+    await showWalksWithPagination(ctx, walksSnapshot.docs, 0, "find_walk");
+  } catch (error) {
+    console.error("Ошибка при показе прогулок:", error);
+    await updateWizardMessage(ctx, "Произошла ошибка при загрузке прогулок.", {
       inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
-    },
-  });
+    });
+  }
 });
 
+// Обработчик прогулок завтра
 bot.action("walks_tomorrow", async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
 
-  const tomorrow = moment().add(1, "days").format("DD.MM.YYYY");
-  const walksSnapshot = await db
-    .collection("walks")
-    .where("date", "==", tomorrow)
-    .get();
+    const tomorrow = moment().add(1, "days").format("DD.MM.YYYY");
+    const walksSnapshot = await db
+      .collection("walks")
+      .where("date", "==", tomorrow)
+      .get();
 
-  const activeWalks = walksSnapshot.docs.filter(
-    (doc) => !doc.data().status || doc.data().status !== "archived"
-  );
-
-  if (activeWalks.length === 0) {
-    await ctx.reply("На завтра прогулок не найдено.", {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
-          [{ text: "⬅️ Назад", callback_data: "find_walk" }],
-        ],
-      },
-    });
-    return;
-  }
-
-  await ctx.reply("Прогулки на завтра:");
-
-  await showWalksList(ctx, walksSnapshot.docs);
-
-  await ctx.reply("Вернуться:", {
-    reply_markup: {
+    // Показываем прогулки с пагинацией
+    await showWalksWithPagination(ctx, walksSnapshot.docs, 0, "find_walk");
+  } catch (error) {
+    console.error("Ошибка при показе прогулок:", error);
+    await updateWizardMessage(ctx, "Произошла ошибка при загрузке прогулок.", {
       inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
-    },
-  });
+    });
+  }
 });
 
+// Обработчик всех прогулок
 bot.action("walks_all_dates", async (ctx) => {
-  await ctx.answerCbQuery();
+  try {
+    await ctx.answerCbQuery();
 
-  const walksSnapshot = await db.collection("walks").get();
+    const walksSnapshot = await db.collection("walks").get();
 
-  if (walksSnapshot.empty) {
-    await ctx.reply("Прогулок не найдено.", {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
-          [{ text: "⬅️ Назад", callback_data: "find_walk" }],
-        ],
-      },
-    });
-    return;
-  }
-
-  await ctx.reply("Все прогулки:");
-
-  await showWalksList(ctx, walksSnapshot.docs);
-
-  await ctx.reply("Вернуться:", {
-    reply_markup: {
+    // Показываем прогулки с пагинацией
+    await showWalksWithPagination(ctx, walksSnapshot.docs, 0, "find_walk");
+  } catch (error) {
+    console.error("Ошибка при показе прогулок:", error);
+    await updateWizardMessage(ctx, "Произошла ошибка при загрузке прогулок.", {
       inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
-    },
-  });
+    });
+  }
 });
 
 // Модифицированная функция showProfile
@@ -4447,55 +4525,50 @@ async function showWalksList(ctx, walkDocs) {
 }
 
 // Функция для обновления сообщения вместо отправки нового
+// Улучшенная функция обновления сообщений для исправления проблемы с контекстом кнопок
 async function updateWizardMessage(ctx, text, keyboard = null) {
   try {
-    const modifiedText = text + " ";
+    // Определяем ID сообщения, которое нужно обновить
+    let messageId;
 
-    // Проверяем, есть ли сохранённый ID сообщения для обновления
-    if (ctx.session && ctx.session.lastMessageId) {
+    // Если это callback (нажатие на кнопку), используем ID текущего сообщения
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      messageId = ctx.callbackQuery.message.message_id;
+    }
+    // Иначе берем ID из сессии (если есть)
+    else if (ctx.session && ctx.session.lastMessageId) {
+      messageId = ctx.session.lastMessageId;
+    }
+
+    // Если нашли ID сообщения, обновляем его
+    if (messageId) {
       try {
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          ctx.session.lastMessageId,
-          null,
-          modifiedText,
-          {
-            parse_mode: "HTML",
-            reply_markup: keyboard,
-          }
-        );
-        return true; // Успешное обновление
-      } catch (error) {
-        console.error("Ошибка при обновлении сообщения:", error);
-        // Если сообщение не найдено (было удалено) или другая ошибка - создаем новое
-        const msg = await ctx.reply(modifiedText, {
+        await ctx.telegram.editMessageText(ctx.chat.id, messageId, null, text, {
           parse_mode: "HTML",
           reply_markup: keyboard,
         });
 
-        // Обновляем ID сообщения
-        ctx.session.lastMessageId = msg.message_id;
-        return false;
+        // Сохраняем ID в сессии для будущих обновлений
+        if (!ctx.session) ctx.session = {};
+        ctx.session.lastMessageId = messageId;
+        return;
+      } catch (error) {
+        console.log("Ошибка при обновлении сообщения:", error.message);
+        // Если не удалось обновить, отправим новое
       }
     }
-  } catch (error) {
-    console.error("Ошибка при обновлении сообщения:", error);
-  }
 
-  // Если обновить не удалось или нет сохранённого ID, создаём новое сообщение
-  try {
+    // Если не удалось обновить, отправляем новое сообщение
     const msg = await ctx.reply(text, {
       parse_mode: "HTML",
       reply_markup: keyboard,
     });
 
-    // Сохраняем ID сообщения для будущих обновлений
+    // Сохраняем ID нового сообщения
     if (!ctx.session) ctx.session = {};
     ctx.session.lastMessageId = msg.message_id;
-    return false; // Создано новое сообщение
   } catch (error) {
-    console.error("Ошибка при отправке нового сообщения:", error);
-    return false;
+    console.error("Ошибка в функции updateWizardMessage:", error);
   }
 }
 
@@ -4556,10 +4629,15 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
     const walkDoc = await db.collection("walks").doc(walkId).get();
 
     if (!walkDoc.exists) {
-      await ctx.reply("Прогулка не найдена или была отменена.", {
-        reply_markup: getMainMenuKeyboard(),
-      });
-      return;
+      return await updateWizardMessage(
+        ctx,
+        "Прогулка не найдена или была отменена.",
+        {
+          inline_keyboard: [
+            [{ text: "⬅️ Назад", callback_data: "return_to_walks" }],
+          ],
+        }
+      );
     }
 
     const walk = walkDoc.data();
@@ -4569,23 +4647,17 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
     if (walk.locationText) {
       locationInfo = walk.locationText;
     } else if (walk.location) {
-      // Если есть описание местоположения, используем его
       locationInfo = walk.location.description || "По геолокации";
-
-      // Дополнительно можно добавить кнопку для просмотра на карте
-      if (walk.location.latitude && walk.location.longitude) {
-        locationInfo += " (можно открыть на карте)";
-      }
     }
 
     // Формируем детальную информацию о прогулке
     let walkDetails = `
-  🗓 Прогулка: ${walk.date}, ${walk.time}
-  📍 Место: ${locationInfo}
-  🔄 Тип: ${walk.type === "single" ? "Разовая" : "Регулярная"}
-  👤 Организатор: ${walk.organizer.name} ${walk.organizer.username ? "@" + walk.organizer.username : ""}
-  🐕 Собака: ${walk.dog.name}, ${walk.dog.breed}, ${getDogSizeText(walk.dog.size)}, ${getDogAgeText(walk.dog.age)}
-  `;
+🗓 Прогулка: ${walk.date}, ${walk.time}  
+📍 Место: ${locationInfo}  
+🔄 Тип: ${walk.type === "single" ? "Разовая" : "Регулярная"}  
+👤 Организатор: ${walk.organizer.name} ${walk.organizer.username ? "@" + walk.organizer.username : ""}  
+🐕 Собака: ${walk.dog.name}, ${walk.dog.breed}, ${getDogSizeText(walk.dog.size)}, ${getDogAgeText(walk.dog.age)}  
+`;
 
     // Добавляем список участников
     if (walk.participants && walk.participants.length > 0) {
@@ -4641,7 +4713,6 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
           },
         ]);
       }
-
       keyboard.push([
         {
           text: "Связаться с организатором 📩",
@@ -4650,31 +4721,96 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
       ]);
     }
 
-    // Добавляем кнопку "Назад" в главное меню
+    // Добавляем кнопку "Назад к списку"
     keyboard.push([
-      { text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" },
+      { text: "⬅️ Назад к списку", callback_data: "return_to_walks" },
     ]);
 
-    // Если есть фото собаки, показываем его
+    // Удаляем предыдущее сообщение с фото, если оно было
+    if (ctx.session && ctx.session.photoMessageId) {
+      try {
+        await ctx.deleteMessage(ctx.session.photoMessageId);
+        delete ctx.session.photoMessageId;
+      } catch (error) {
+        console.log("Не удалось удалить предыдущее фото:", error);
+      }
+    }
+
+    // Если у собаки есть фото, отправляем информацию вместе с фото
     if (walk.dog.photoId) {
-      await ctx.replyWithPhoto(walk.dog.photoId, {
+      // Отправляем фото с подписью
+      const photoMsg = await ctx.replyWithPhoto(walk.dog.photoId, {
         caption: walkDetails,
         reply_markup: { inline_keyboard: keyboard },
       });
+
+      // Сохраняем ID сообщения с фото
+      if (!ctx.session) ctx.session = {};
+      ctx.session.lastMessageId = photoMsg.message_id;
+      ctx.session.photoMessageId = photoMsg.message_id;
     } else {
-      await ctx.reply(walkDetails, {
-        reply_markup: { inline_keyboard: keyboard },
+      // Если нет фото, просто обновляем текущее сообщение
+      await updateWizardMessage(ctx, walkDetails, {
+        inline_keyboard: keyboard,
       });
     }
   } catch (error) {
     console.error("Ошибка при отображении деталей прогулки:", error);
-    await ctx.reply("Произошла ошибка. Возврат в главное меню.", {
-      reply_markup: getMainMenuKeyboard(),
-    });
+    await updateWizardMessage(
+      ctx,
+      "Произошла ошибка. Возврат в главное меню.",
+      {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+        ],
+      }
+    );
   }
 });
 
-// Присоединение к прогулке
+// Обработчик возврата к списку прогулок
+bot.action("return_to_walks", async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+
+    // Удаляем сообщение с фото, если оно было
+    if (ctx.session && ctx.session.photoMessageId) {
+      try {
+        await ctx.deleteMessage(ctx.session.photoMessageId);
+        delete ctx.session.photoMessageId;
+      } catch (error) {
+        console.log("Не удалось удалить сообщение с фото:", error);
+      }
+    }
+
+    // Возвращаемся к последнему списку прогулок
+    if (ctx.session && ctx.session.lastWalks) {
+      const returnCommand =
+        ctx.session.lastReturnCommand || "back_to_main_menu";
+      await showWalksWithPagination(
+        ctx,
+        ctx.session.lastWalks,
+        0,
+        returnCommand
+      );
+    } else {
+      // Если нет сохраненных прогулок, возвращаемся в главное меню
+      await updateWizardMessage(ctx, "Главное меню", getMainMenuKeyboard());
+    }
+  } catch (error) {
+    console.error("Ошибка при возврате к списку прогулок:", error);
+    await updateWizardMessage(
+      ctx,
+      "Произошла ошибка. Возврат в главное меню.",
+      {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+        ],
+      }
+    );
+  }
+});
+// Исправленный обработчик присоединения к прогулке
 bot.action(/join_walk_(.+)/, async (ctx) => {
   try {
     const walkId = ctx.match[1];
@@ -4683,8 +4819,10 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
 
     if (!walkDoc.exists) {
       await ctx.answerCbQuery("Прогулка не найдена или была отменена.");
-      await ctx.reply("Прогулка не найдена или была отменена.", {
-        reply_markup: getMainMenuKeyboard(),
+      await updateWizardMessage(ctx, "Прогулка не найдена или была отменена.", {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад", callback_data: "return_to_walks" }],
+        ],
       });
       return;
     }
@@ -4735,10 +4873,16 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
     // Уведомляем пользователя о успешном присоединении
     await ctx.answerCbQuery("✅ Вы присоединились к прогулке!");
 
-    // Добавляем возврат в главное меню
-    await ctx.reply(
+    // Обновляем то же сообщение, в котором была нажата кнопка
+    await updateWizardMessage(
+      ctx,
       "✅ Вы присоединились к прогулке! Организатор получил уведомление.",
-      { reply_markup: getMainMenuKeyboard() }
+      {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад к списку", callback_data: "return_to_walks" }],
+          [{ text: "⬅️ В главное меню", callback_data: "back_to_main_menu" }],
+        ],
+      }
     );
 
     // Уведомляем организатора о новом участнике
@@ -4746,11 +4890,11 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
       await bot.telegram.sendMessage(
         walk.organizer.id,
         `
-  📢 Новый участник в вашей прогулке!
-  👤 ${userData.name}
-  🐕 ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
-  📩 Контакт: ${ctx.from.username ? "@" + ctx.from.username : "Нет username"}
-  `,
+📢 Новый участник в вашей прогулке!
+👤 ${userData.name}
+🐕 ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+📩 Контакт: ${ctx.from.username ? "@" + ctx.from.username : "Нет username"}
+`,
         { reply_markup: getMainMenuKeyboard() }
       );
 
@@ -4764,13 +4908,18 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
   } catch (error) {
     console.error("Ошибка при присоединении к прогулке:", error);
     await ctx.answerCbQuery("Произошла ошибка");
-    await ctx.reply("Произошла ошибка. Возврат в главное меню.", {
-      reply_markup: getMainMenuKeyboard(),
-    });
+    await updateWizardMessage(
+      ctx,
+      "Произошла ошибка. Возврат в главное меню.",
+      {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+        ],
+      }
+    );
   }
 });
 
-// Покинуть прогулку
 // Покинуть прогулку
 bot.action(/leave_walk_(.+)/, async (ctx) => {
   try {
@@ -4780,8 +4929,10 @@ bot.action(/leave_walk_(.+)/, async (ctx) => {
 
     if (!walkDoc.exists) {
       await ctx.answerCbQuery("Прогулка не найдена или была отменена.");
-      await ctx.reply("Прогулка не найдена или была отменена.", {
-        reply_markup: getMainMenuKeyboard(),
+      await updateWizardMessage(ctx, "Прогулка не найдена или была отменена.", {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад", callback_data: "return_to_walks" }],
+        ],
       });
       return;
     }
@@ -4799,17 +4950,19 @@ bot.action(/leave_walk_(.+)/, async (ctx) => {
 
     await ctx.answerCbQuery("Вы покинули прогулку.");
 
-    // Добавляем возврат в главное меню
-    await ctx.reply("Вы покинули прогулку.", {
-      reply_markup: getMainMenuKeyboard(),
+    // Обновляем то же сообщение, в котором была нажата кнопка
+    await updateWizardMessage(ctx, "Вы покинули прогулку.", {
+      inline_keyboard: [
+        [{ text: "⬅️ Назад к списку", callback_data: "return_to_walks" }],
+        [{ text: "⬅️ В главное меню", callback_data: "back_to_main_menu" }],
+      ],
     });
 
     // Уведомляем организатора
     try {
       await bot.telegram.sendMessage(
         walk.organizer.id,
-        `Участник ${ctx.from.username ? "@" + ctx.from.username : ctx.from.id} покинул вашу прогулку.`,
-        { reply_markup: getMainMenuKeyboard() }
+        `Участник ${ctx.from.username ? "@" + ctx.from.username : ctx.from.id} покинул вашу прогулку.`
       );
     } catch (error) {
       console.error("Ошибка при отправке уведомления организатору:", error);
@@ -4817,9 +4970,15 @@ bot.action(/leave_walk_(.+)/, async (ctx) => {
   } catch (error) {
     console.error("Ошибка при покидании прогулки:", error);
     await ctx.answerCbQuery("Произошла ошибка");
-    await ctx.reply("Произошла ошибка. Возврат в главное меню.", {
-      reply_markup: getMainMenuKeyboard(),
-    });
+    await updateWizardMessage(
+      ctx,
+      "Произошла ошибка. Возврат в главное меню.",
+      {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+        ],
+      }
+    );
   }
 });
 
@@ -5245,123 +5404,67 @@ bot.action("edit_dog_photo", async (ctx) => {
 });
 
 bot.action("my_walks", async (ctx) => {
-  await ctx.answerCbQuery();
-  // Реализация с использованием updateWizardMessage
-  const walksSnapshot = await db
-    .collection("walks")
-    .where("organizer.id", "==", ctx.from.id)
-    .get();
+  try {
+    await ctx.answerCbQuery();
 
-  if (walksSnapshot.empty) {
-    await updateWizardMessage(ctx, "У вас пока нет созданных прогулок.", {
+    // Получаем прогулки пользователя
+    const walksSnapshot = await db
+      .collection("walks")
+      .where("organizer.id", "==", ctx.from.id)
+      .get();
+
+    // Показываем с пагинацией
+    await showWalksWithPagination(
+      ctx,
+      walksSnapshot.docs,
+      0,
+      "back_to_main_menu"
+    );
+  } catch (error) {
+    console.error("Ошибка при показе прогулок:", error);
+    await updateWizardMessage(ctx, "Произошла ошибка при загрузке прогулок.", {
       inline_keyboard: [
-        [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
-        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+        [{ text: "⬅️ Назад", callback_data: "back_to_main_menu" }],
       ],
     });
-    return;
   }
-
-  // Для прогулок возможно придется отправить новые сообщения, т.к. их может быть много
-  await updateWizardMessage(ctx, "Ваши созданные прогулки:", {
-    inline_keyboard: [
-      [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
-    ],
-  });
-
-  // Отображаем список прогулок
-  await showWalksList(ctx, walksSnapshot.docs);
 });
 
 bot.action("my_participations", async (ctx) => {
   try {
     await ctx.answerCbQuery();
 
-    // Находим прогулки, где пользователь участвует
+    // Получаем все прогулки
     const walksSnapshot = await db.collection("walks").get();
+    const participatingWalks = [];
 
-    // Массив для всех прогулок (и организованных, и где участвует)
-    const allInvolvedWalks = [];
-
-    // Перебираем все прогулки
+    // Фильтруем прогулки, где пользователь является участником
     for (const walkDoc of walksSnapshot.docs) {
       const walk = walkDoc.data();
-      const walkId = walkDoc.id;
 
-      // Проверяем, является ли пользователь организатором
-      if (walk.organizer.id == ctx.from.id) {
-        // Добавляем пометку, что это собственная прогулка
-        allInvolvedWalks.push({
-          id: walkId,
-          ...walk,
-          isOwn: true, // Пометка "Моя прогулка"
-        });
-      }
-      // Проверяем, является ли пользователь участником
-      else if (
-        walk.participants &&
-        walk.participants.some((p) => p.id == ctx.from.id)
+      // Если пользователь - организатор или участник
+      if (
+        walk.organizer.id == ctx.from.id ||
+        (walk.participants &&
+          walk.participants.some((p) => p.id == ctx.from.id))
       ) {
-        allInvolvedWalks.push({
-          id: walkId,
-          ...walk,
-          isOwn: false,
-        });
+        participatingWalks.push(walkDoc);
       }
     }
 
-    // Если прогулок нет вообще
-    if (allInvolvedWalks.length === 0) {
-      ctx.reply("Вы пока не участвуете ни в одной прогулке.", {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
-            [{ text: "📍 Найти прогулку", callback_data: "find_walk" }],
-            [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
-          ],
-        },
-      });
-      return;
-    }
-
-    // Сортируем прогулки по дате и времени (от ближайших к дальним)
-    allInvolvedWalks.sort((a, b) => {
-      // Сначала сравниваем даты
-      const dateA = a.date.split(".").reverse().join("-");
-      const dateB = b.date.split(".").reverse().join("-");
-
-      if (dateA !== dateB) {
-        return dateA.localeCompare(dateB);
-      }
-
-      // Если даты одинаковые, сравниваем время
-      return a.time.localeCompare(b.time);
-    });
-
-    await ctx.reply("Прогулки, в которых вы участвуете:");
-
-    // Показываем список прогулок с пометкой для собственных
-    for (const walk of allInvolvedWalks) {
-      const walkPreview = formatWalkInfo(walk, walk.isOwn);
-
-      await ctx.reply(walkPreview, {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "Подробнее", callback_data: `walk_details_${walk.id}` }],
-          ],
-        },
-      });
-    }
-
-    await ctx.reply("Вернуться:", {
-      reply_markup: {
-        inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "find_walk" }]],
-      },
-    });
+    // Показываем прогулки с пагинацией
+    await showWalksWithPagination(
+      ctx,
+      participatingWalks,
+      0,
+      "back_to_main_menu"
+    );
   } catch (error) {
-    console.error("Ошибка при отображении участия в прогулках:", error);
-    await ctx.reply("Произошла ошибка. Попробуйте снова.", {
-      reply_markup: getMainMenuKeyboard(),
+    console.error("Ошибка при показе прогулок:", error);
+    await updateWizardMessage(ctx, "Произошла ошибка при загрузке прогулок.", {
+      inline_keyboard: [
+        [{ text: "⬅️ Назад", callback_data: "back_to_main_menu" }],
+      ],
     });
   }
 });
