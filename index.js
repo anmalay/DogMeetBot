@@ -148,6 +148,246 @@ const POPULAR_CITIES = [
   "Казань",
 ];
 
+// Функция для определения звания участника по количеству прогулок
+function getParticipantRank(participationsCount) {
+  if (participationsCount >= 200) return "Легенда прогулок";
+  if (participationsCount >= 120) return "Покоритель маршрутов";
+  if (participationsCount >= 80) return "Неутомимый";
+  if (participationsCount >= 50) return "Бродяга";
+  if (participationsCount >= 35) return "Приключенец";
+  if (participationsCount >= 20) return "Путешественник";
+  if (participationsCount >= 10) return "Исследователь";
+  if (participationsCount >= 5) return "Верный друг";
+  if (participationsCount >= 1) return "Гуляка";
+  return "Хвостик";
+}
+
+// Функция для определения звания организатора
+function getOrganizerRank(organizerCount) {
+  if (organizerCount >= 200) return "Альфа";
+  if (organizerCount >= 120) return "Повелитель прогулок";
+  if (organizerCount >= 80) return "Пёсья душа";
+  if (organizerCount >= 50) return "Собачий магнит";
+  if (organizerCount >= 35) return "Полководец стаи";
+  if (organizerCount >= 20) return "Организатор";
+  if (organizerCount >= 10) return "Собаковод";
+  if (organizerCount >= 5) return "Вожак стаи";
+  if (organizerCount >= 1) return "Шерстяной лидер";
+  return "Мокрый нос";
+}
+
+// Функция для обновления званий пользователя
+async function updateUserRanks(userId) {
+  try {
+    // Получаем данные пользователя
+    const userDoc = await db.collection("users").doc(String(userId)).get();
+
+    if (!userDoc.exists) return;
+
+    const userData = userDoc.data();
+
+    // Инициализируем достижения, если их нет
+    if (!userData.achievements) {
+      userData.achievements = {
+        walkCount: 0,
+        organizedCount: 0,
+        participantRank: "Хвостик",
+        organizerRank: "Мокрый нос",
+        badges: [],
+        specialStatus: {
+          title: null,
+          expiresAt: null,
+        },
+        lastUpdated: new Date(),
+      };
+    }
+
+    // Определяем текущие звания
+    const currentParticipantRank = userData.achievements.participantRank;
+    const currentOrganizerRank = userData.achievements.organizerRank;
+
+    // Определяем новые звания
+    const newParticipantRank = getParticipantRank(
+      userData.achievements.walkCount
+    );
+    const newOrganizerRank = getOrganizerRank(
+      userData.achievements.organizedCount
+    );
+
+    // Обновляем звания в базе данных
+    await db.collection("users").doc(String(userId)).update({
+      "achievements.participantRank": newParticipantRank,
+      "achievements.organizerRank": newOrganizerRank,
+      "achievements.lastUpdated": new Date(),
+    });
+
+    // Если достигнут новый ранг, отправляем уведомление
+    if (currentParticipantRank !== newParticipantRank) {
+      await bot.telegram.sendMessage(
+        userId,
+        `🎖 <b>Поздравляем с новым званием!</b>\n\nВы достигли ранга "${newParticipantRank}" как участник прогулок!\n\nПродолжайте в том же духе и открывайте новые звания!`,
+        { parse_mode: "HTML" }
+      );
+    }
+
+    if (currentOrganizerRank !== newOrganizerRank) {
+      await bot.telegram.sendMessage(
+        userId,
+        `🏆 <b>Поздравляем с новым званием организатора!</b>\n\nВы достигли ранга "${newOrganizerRank}" как организатор прогулок!\n\nСоздавайте больше прогулок, чтобы получить следующее звание!`,
+        { parse_mode: "HTML" }
+      );
+    }
+
+    // Возвращаем информацию о изменении званий
+    return {
+      participantChanged: currentParticipantRank !== newParticipantRank,
+      organizerChanged: currentOrganizerRank !== newOrganizerRank,
+      newParticipantRank,
+      newOrganizerRank,
+    };
+  } catch (error) {
+    console.error("Ошибка при обновлении званий пользователя:", error);
+    return null;
+  }
+}
+
+async function addBadge(userId, badgeId, badgeName, badgeDescription) {
+  const userDoc = await db.collection("users").doc(String(userId)).get();
+  if (!userDoc.exists) return false;
+
+  const userData = userDoc.data();
+  if (!userData.achievements) return false;
+
+  // Проверяем, есть ли уже такой бейдж
+  const existingBadge = (userData.achievements.badges || []).find(
+    (b) => b.id === badgeId
+  );
+  if (existingBadge) return false;
+
+  // Создаем объект бейджа
+  const badge = {
+    id: badgeId,
+    name: badgeName,
+    description: badgeDescription,
+    earnedAt: new Date(),
+  };
+
+  // Добавляем бейдж
+  await db
+    .collection("users")
+    .doc(String(userId))
+    .update({
+      "achievements.badges": admin.firestore.FieldValue.arrayUnion(badge),
+    });
+
+  // Отправляем пользователю уведомление
+  await bot.telegram.sendMessage(
+    userId,
+    `🏆 <b>Новое достижение!</b>\n\nВы получили значок "${badgeName}"!\n\n${badgeDescription}`,
+    { parse_mode: "HTML" }
+  );
+
+  return true;
+}
+
+async function checkLuckyTail(userId, walkCount) {
+  // Проверяем, является ли это 5-й, 10-й, 15-й и т.д. прогулкой
+  if (walkCount % 5 === 0) {
+    // Генерируем случайную награду
+    const rewards = [
+      {
+        type: "badge",
+        id: "lucky_tail",
+        name: "Хвост удачи",
+        description: "Случайная удача улыбнулась вам!",
+      },
+      {
+        type: "temp_status",
+        id: "dog_star",
+        name: "Собачья звезда",
+        duration: 3, // дни
+        description: "Временный особый статус на 3 дня",
+      },
+      {
+        type: "progress_boost",
+        value: 2,
+        description: "Двойной прогресс к следующему званию!",
+      },
+      {
+        type: "hidden_achievement",
+        id: "mystery_walker",
+        name: "Таинственный гуляка",
+        description: "Вы открыли скрытое достижение!",
+      },
+    ];
+
+    // Выбираем случайную награду
+    const randomReward = rewards[Math.floor(Math.random() * rewards.length)];
+
+    // Применяем награду в зависимости от типа
+    let message = "";
+
+    switch (randomReward.type) {
+      case "badge":
+        await addBadge(
+          userId,
+          randomReward.id,
+          randomReward.name,
+          randomReward.description
+        );
+        message = `🍀 <b>Хвост удачи!</b>\n\nВы получили особый значок "${randomReward.name}"!`;
+        break;
+
+      case "temp_status":
+        // Устанавливаем временный статус
+        const expiry = new Date();
+        expiry.setDate(expiry.getDate() + randomReward.duration);
+
+        await db
+          .collection("users")
+          .doc(String(userId))
+          .update({
+            "achievements.specialStatus": {
+              title: randomReward.name,
+              expiresAt: expiry,
+            },
+          });
+
+        message = `🍀 <b>Хвост удачи!</b>\n\nВы получили временный статус "${randomReward.name}" на ${randomReward.duration} дня!`;
+        break;
+
+      case "progress_boost":
+        // В нашем упрощенном варианте просто добавляем еще одну прогулку к счетчику
+        await db
+          .collection("users")
+          .doc(String(userId))
+          .update({
+            "achievements.walkCount": admin.firestore.FieldValue.increment(1),
+          });
+
+        message = `🍀 <b>Хвост удачи!</b>\n\nВы получили бонус +1 к вашему счетчику прогулок!`;
+        break;
+
+      case "hidden_achievement":
+        await addBadge(
+          userId,
+          randomReward.id,
+          randomReward.name,
+          randomReward.description
+        );
+        message = `🍀 <b>Хвост удачи!</b>\n\nВы открыли скрытое достижение "${randomReward.name}"!`;
+        break;
+    }
+
+    // Отправляем уведомление о награде
+    await bot.telegram.sendMessage(userId, message, { parse_mode: "HTML" });
+
+    return true;
+  }
+
+  return false;
+}
+
 async function findNearbyWalksUnified(
   ctx,
   latitude,
@@ -281,11 +521,53 @@ async function showProfile(ctx) {
     }
 
     const userData = userDoc.data();
+    const achievements = userData.achievements || {
+      walkCount: 0,
+      organizedCount: 0,
+      participantRank: "Хвостик",
+      organizerRank: "Мокрый нос",
+      badges: [],
+    };
+
+    // Проверяем специальный статус
+    let specialStatusText = "";
+    if (achievements.specialStatus && achievements.specialStatus.title) {
+      const expiryDate = achievements.specialStatus.expiresAt
+        ? new Date(achievements.specialStatus.expiresAt)
+        : null;
+      if (expiryDate && expiryDate > new Date()) {
+        specialStatusText = `\n🌟 Особый статус: ${achievements.specialStatus.title}`;
+      } else {
+        // Если статус истек, удаляем его
+        db.collection("users").doc(String(ctx.from.id)).update({
+          "achievements.specialStatus.title": null,
+          "achievements.specialStatus.expiresAt": null,
+        });
+      }
+    }
+
+    // Формируем текст последних достижений
+    let badgesText = "";
+    if (achievements.badges && achievements.badges.length > 0) {
+      const latestBadges = achievements.badges.slice(-3); // Последние 3 значка
+      badgesText = "\n🏅 Последние достижения: \n";
+      latestBadges.forEach((badge) => {
+        badgesText += `• ${badge.name} - ${badge.description}\n`;
+      });
+    }
 
     const profileText = `
-👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
+🐕 <b>КАРТОЧКА СОБАКОВОДА</b> 🐕
+
+👤 <b>${userData.name}</b> 
+📊 <b>Звания:</b>
+   Участник: ${achievements.participantRank}
+   Организатор: ${achievements.organizerRank}
+🦴 Прогулок: ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
+
 📍 Город: ${userData.city}
 🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+${badgesText}
     `;
 
     // Если это ответ на callback, пытаемся редактировать сообщение
@@ -299,6 +581,10 @@ async function showProfile(ctx) {
                 {
                   text: "✏️ Редактировать профиль",
                   callback_data: "edit_profile_menu",
+                },
+                {
+                  text: "🏆 Все достижения",
+                  callback_data: "show_all_badges",
                 },
               ],
               [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
@@ -326,6 +612,10 @@ async function showProfile(ctx) {
               text: "✏️ Редактировать профиль",
               callback_data: "edit_profile_menu",
             },
+            {
+              text: "🏆 Все достижения",
+              callback_data: "show_all_badges",
+            },
           ],
           [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
         ],
@@ -337,7 +627,6 @@ async function showProfile(ctx) {
     ctx.session.lastMessageId = msg.message_id;
 
     // Если у собаки есть фото, отправляем его отдельным сообщением
-    // (нельзя преобразовать текстовое сообщение в фото при редактировании)
     if (userData.dog && userData.dog.photoId) {
       await ctx.replyWithPhoto(userData.dog.photoId);
     }
@@ -619,10 +908,6 @@ async function notifyNearbyUsers(walkId, organizer, walkData) {
   }
 }
 
-// Функция для напоминания о предстоящих прогулках и удаления прошедших
-/**
- * Обрабатывает прошедшие прогулки и отправляет напоминания о предстоящих
- */
 async function remindAboutWalks() {
   const now = new Date();
   const today = moment(now).format("DD.MM.YYYY");
@@ -651,6 +936,7 @@ async function remindAboutWalks() {
     if (walk.type === "single" && timeDiffMinutes > 60) {
       // Проверяем, не архивирована ли уже прогулка
       if (!walk.status || walk.status !== "archived") {
+        // Архивируем прогулку
         await db.collection("walks").doc(walkId).update({
           status: "archived",
           archivedAt: new Date(),
@@ -658,6 +944,9 @@ async function remindAboutWalks() {
         console.log(
           `Прогулка ${walkId} архивирована (прошла более часа назад)`
         );
+
+        // Записываем прогулку в достижения
+        await recordCompletedWalk(walkId);
       }
       continue;
     }
@@ -697,6 +986,9 @@ async function remindAboutWalks() {
         console.log(
           `Регулярная прогулка ${walkId} отмечена как завершенная на ${today}`
         );
+
+        // Записываем прогулку в достижения
+        await recordCompletedWalk(walkId);
       }
       continue;
     }
@@ -856,6 +1148,7 @@ async function showWalksWithPagination(
 }
 
 // Вспомогательная функция для завершения регистрации
+// Вспомогательная функция для завершения регистрации
 async function finishRegistration(ctx) {
   try {
     const userData = ctx.wizard.state.userData || {};
@@ -867,6 +1160,20 @@ async function finishRegistration(ctx) {
     userData.dogBreed = userData.dogBreed || "Не указана";
     userData.dogSize = userData.dogSize || "Не указана";
     userData.dogAge = userData.dogAge || "Не указана";
+
+    // Добавляем систему достижений при регистрации
+    const achievements = {
+      walkCount: 0,
+      organizedCount: 0,
+      participantRank: "Хвостик",
+      organizerRank: "Мокрый нос",
+      badges: [],
+      specialStatus: {
+        title: null,
+        expiresAt: null,
+      },
+      lastUpdated: new Date(),
+    };
 
     // Сохраняем данные пользователя в базу данных
     const user = {
@@ -882,6 +1189,7 @@ async function finishRegistration(ctx) {
         age: userData.dogAge,
         photoId: userData.dogPhotoId || null,
       },
+      achievements: achievements,
       createdAt: new Date(),
     };
 
@@ -890,7 +1198,13 @@ async function finishRegistration(ctx) {
     // Отправляем завершающее сообщение
     await updateWizardMessage(
       ctx,
-      "✅ Профиль создан! Теперь вы можете создавать прогулки или присоединяться к другим.",
+      "<b>🎉 УРА! ПРОФИЛЬ СОЗДАН! 🎉</b> \n\n" +
+        '🏆 Вы получили звание "<b>Хвостик</b>" и свой первый бейдж "<b>Новичок</b>"!\n\n' +
+        "🐾 Теперь вы можете:\n" +
+        "- Создавать веселые прогулки\n" +
+        "- Искать новых друзей поблизости \n" +
+        "- Зарабатывать достижения и повышать уровень\n\n" +
+        "<i>Готовы к первой прогулке? Начните прямо сейчас!</i>",
       getMainMenuKeyboard()
     );
   } catch (error) {
@@ -901,7 +1215,6 @@ async function finishRegistration(ctx) {
     );
   }
 }
-
 // Добавить эту функцию перед определением сцен редактирования прогулки
 async function initWalkEditScene(ctx, sceneName) {
   try {
@@ -1436,7 +1749,11 @@ const registerScene = new Scenes.WizardScene(
           ctx.wizard.state.userData.city = data.replace("city_", "");
 
           // Обновляем сообщение - переходим к имени собаки
-          await updateWizardMessage(ctx, "Как зовут вашу собаку?", null);
+          await updateWizardMessage(
+            ctx,
+            "<b>А как зовут вашего хвостатого друга?</b> 🐶",
+            null
+          );
 
           return ctx.wizard.next();
         } else if (data === "send_location_reg") {
@@ -1502,7 +1819,7 @@ const registerScene = new Scenes.WizardScene(
         // Обновляем основное сообщение с подтверждением и запросом имени собаки
         await updateWizardMessage(
           ctx,
-          "🎉 Отлично! Геолокация сохранена.\n\nКак зовут вашу собаку?",
+          "🎉 Отлично! Геолокация сохранена.\n\n<b>А как зовут вашего хвостатого друга?</b> 🐶",
           null
         );
 
@@ -1510,7 +1827,11 @@ const registerScene = new Scenes.WizardScene(
       }
 
       // Если мы здесь без геолокации/callback, спрашиваем имя собаки
-      await updateWizardMessage(ctx, "Как зовут вашу собаку?", null);
+      await updateWizardMessage(
+        ctx,
+        "<b>А как зовут вашего хвостатого друга?</b> 🐶",
+        null
+      );
       return ctx.wizard.next();
     } catch (error) {
       console.error("Ошибка при обработке города/геолокации:", error);
@@ -1556,7 +1877,12 @@ const registerScene = new Scenes.WizardScene(
       ]),
     };
 
-    await updateWizardMessage(ctx, "Выберите породу", keyboard);
+    await updateWizardMessage(
+      ctx,
+      "<b>Какой породы ваш четвероногий компаньон?</b> 🧬\n" +
+        "<i>(Выберите из списка или введите вручную)</i>",
+      keyboard
+    );
     return ctx.wizard.next();
   },
 
@@ -1577,9 +1903,19 @@ const registerScene = new Scenes.WizardScene(
         // Переходим к следующему шагу - размер собаки
         const sizeKeyboard = {
           inline_keyboard: [
-            [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
-            [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
-            [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
+            [
+              {
+                text: "🐾 Маленькая (до 10 кг)",
+                callback_data: "size_small",
+              },
+            ],
+            [
+              {
+                text: "🐕 Средняя (10–25 кг)",
+                callback_data: "size_medium",
+              },
+            ],
+            [{ text: "🐕‍🦺 Крупная (25+ кг)", callback_data: "size_large" }],
           ],
         };
 
@@ -1618,9 +1954,21 @@ const registerScene = new Scenes.WizardScene(
       // Переходим к следующему шагу - размер собаки
       const sizeKeyboard = {
         inline_keyboard: [
-          [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
-          [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
-          [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
+          [
+            [
+              {
+                text: "🐾 Маленькая (до 10 кг)",
+                callback_data: "size_small",
+              },
+            ],
+            [
+              {
+                text: "🐕 Средняя (10–25 кг)",
+                callback_data: "size_medium",
+              },
+            ],
+            [{ text: "🐕‍🦺 Крупная (25+ кг)", callback_data: "size_large" }],
+          ],
         ],
       };
 
@@ -1645,9 +1993,19 @@ const registerScene = new Scenes.WizardScene(
       // Переходим к следующему шагу
       const sizeKeyboard = {
         inline_keyboard: [
-          [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
-          [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
-          [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
+          [
+            {
+              text: "🐾 Маленькая (до 10 кг)",
+              callback_data: "size_small",
+            },
+          ],
+          [
+            {
+              text: "🐕 Средняя (10–25 кг)",
+              callback_data: "size_medium",
+            },
+          ],
+          [{ text: "🐕‍🦺 Крупная (25+ кг)", callback_data: "size_large" }],
         ],
       };
 
@@ -1666,7 +2024,12 @@ const registerScene = new Scenes.WizardScene(
       ]),
     };
 
-    await updateWizardMessage(ctx, "Выберите породу", breedKeyboard);
+    await updateWizardMessage(
+      ctx,
+      "📍 Отправить геолокацию (рекомендуется)\n" +
+        "<i>(Геолокация поможет находить прогулки в пешей доступности)</i>",
+      breedKeyboard
+    );
     return;
   },
 
@@ -1695,7 +2058,11 @@ const registerScene = new Scenes.WizardScene(
         ],
       };
 
-      await updateWizardMessage(ctx, "Возраст собаки:", ageKeyboard);
+      await updateWizardMessage(
+        ctx,
+        "<b>Сколько лет вашему хвостатому другу?</b> 🗓️",
+        ageKeyboard
+      );
       return ctx.wizard.next();
     }
     // Обработка текстового ввода размера (на всякий случай)
@@ -1725,7 +2092,11 @@ const registerScene = new Scenes.WizardScene(
         ],
       };
 
-      await updateWizardMessage(ctx, "Возраст собаки:", ageKeyboard);
+      await updateWizardMessage(
+        ctx,
+        "<b>Сколько лет вашему хвостатому другу?</b> 🗓️",
+        ageKeyboard
+      );
       return ctx.wizard.next();
     }
 
@@ -1744,7 +2115,11 @@ const registerScene = new Scenes.WizardScene(
       ],
     };
 
-    await updateWizardMessage(ctx, "Возраст собаки:", ageKeyboard);
+    await updateWizardMessage(
+      ctx,
+      "<b>Сколько лет вашему хвостатому другу?</b> 🗓️",
+      ageKeyboard
+    );
     return ctx.wizard.next();
   },
 
@@ -1774,7 +2149,9 @@ const registerScene = new Scenes.WizardScene(
 
       await updateWizardMessage(
         ctx,
-        "Загрузите фото вашей собаки 📸 (необязательно)",
+        "<b>Покажите миру вашего красавчика/красавицу!</b> 📸\n\n" +
+          "Загрузите фото вашей собаки 📸 (необязательно)\n" +
+          "<i>(Необязательно, но увеличивает шансы найти компанию на 70%)</i>",
         photoKeyboard
       );
       return ctx.wizard.next();
@@ -1803,7 +2180,9 @@ const registerScene = new Scenes.WizardScene(
 
       await updateWizardMessage(
         ctx,
-        "Загрузите фото вашей собаки 📸 (необязательно)",
+        "<b>Покажите миру вашего красавчика/красавицу!</b> 📸\n\n" +
+          "Загрузите фото вашей собаки 📸 (необязательно)\n" +
+          "<i>(Необязательно, но увеличивает шансы найти компанию на 70%)</i>",
         photoKeyboard
       );
       return ctx.wizard.next();
@@ -1823,7 +2202,9 @@ const registerScene = new Scenes.WizardScene(
 
     await updateWizardMessage(
       ctx,
-      "Загрузите фото вашей собаки 📸 (необязательно)",
+      "<b>Покажите миру вашего красавчика/красавицу!</b> 📸\n\n" +
+        "Загрузите фото вашей собаки 📸 (необязательно)\n" +
+        "<i>(Необязательно, но увеличивает шансы найти компанию на 70%)</i>",
       photoKeyboard
     );
     return ctx.wizard.next();
@@ -1864,7 +2245,9 @@ const registerScene = new Scenes.WizardScene(
         // Напоминаем о необходимости загрузить фото или пропустить
         await updateWizardMessage(
           ctx,
-          "Пожалуйста, загрузите фото вашей собаки или нажмите 'Пропустить'",
+          "<b>Покажите миру вашего красавчика/красавицу!</b> 📸\n\n" +
+            "Загрузите фото вашей собаки 📸 (необязательно)\n" +
+            "<i>(Необязательно, но увеличивает шансы найти компанию на 70%)</i>",
           {
             inline_keyboard: [
               [{ text: "Пропустить ⏭️", callback_data: "skip_photo" }],
@@ -1940,7 +2323,9 @@ const createWalkScene = new Scenes.WizardScene(
       } else if (data === "date_custom") {
         await updateWizardMessage(
           ctx,
-          "Введите дату в формате ДД.ММ.ГГГГ (только будущие даты):",
+          "<b>Когда отправляемся на поиски приключений?</b> 🗓️\n\n" +
+            "<i>Создавая прогулки, вы зарабатываете очки организатора и повышаете свой статус!</i>\n\n" +
+            "Введите дату в формате ДД.ММ.ГГГГ:",
           {
             inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel" }]],
           }
@@ -2127,7 +2512,7 @@ const createWalkScene = new Scenes.WizardScene(
       // Улучшенные опции для выбора места
       await updateWizardMessage(
         ctx,
-        `Время прогулки: ${ctx.wizard.state.walkData.time}\nГде встречаемся?`,
+        `Время прогулки: ${ctx.wizard.state.walkData.time}\nГде встречаемся? 📍`,
         {
           inline_keyboard: [
             [
@@ -2136,7 +2521,6 @@ const createWalkScene = new Scenes.WizardScene(
                 callback_data: "walk_here",
               },
             ],
-            [{ text: "📍 Выбрать на карте", callback_data: "choose_map_walk" }],
             [{ text: "✏️ Ввести адрес", callback_data: "enter_location_text" }],
             [{ text: "❌ Отмена", callback_data: "cancel" }],
           ],
@@ -2200,7 +2584,7 @@ const createWalkScene = new Scenes.WizardScene(
 
       await updateWizardMessage(
         ctx,
-        `Время прогулки: ${ctx.wizard.state.walkData.time}\nГде встречаемся?`,
+        `Время прогулки: ${ctx.wizard.state.walkData.time}\nГде встречаемся? 📍`,
         {
           inline_keyboard: [
             [
@@ -2209,7 +2593,6 @@ const createWalkScene = new Scenes.WizardScene(
                 callback_data: "walk_here",
               },
             ],
-            [{ text: "📍 Выбрать на карте", callback_data: "choose_map_walk" }],
             [{ text: "✏️ Ввести адрес", callback_data: "enter_location_text" }],
             [{ text: "❌ Отмена", callback_data: "cancel" }],
           ],
@@ -2424,7 +2807,7 @@ const createWalkScene = new Scenes.WizardScene(
 
     // Шаг 1: Отправляем заголовок
     try {
-      const titleMsg = await ctx.reply("Превью прогулки:");
+      const titleMsg = await ctx.reply("✨ <b>АНОНС ПРОГУЛКИ</b> ✨");
       ctx.wizard.state.messageIds.push(titleMsg.message_id);
     } catch (error) {
       console.log("Ошибка при отправке заголовка:", error.message);
@@ -2433,11 +2816,11 @@ const createWalkScene = new Scenes.WizardScene(
     // Шаг 2: Формируем и отправляем детали прогулки
     try {
       let previewText = `
-🗓 Прогулка: ${ctx.wizard.state.walkData.date}, ${ctx.wizard.state.walkData.time}
-📍 Место: ${ctx.wizard.state.walkData.locationText || "По геолокации"}
-🔄 Тип: ${ctx.wizard.state.walkData.type === "single" ? "Разовая" : "Регулярная"}
-👤 Организатор: ${userData.name}
-🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+🗓️ <b>Встреча:</b>  ${ctx.wizard.state.walkData.date}, ${ctx.wizard.state.walkData.time}
+📍 <b>Место сбора:</b> ${ctx.wizard.state.walkData.locationText || "По геолокации"}
+🔄 <b>Формат:</b> ${ctx.wizard.state.walkData.type === "single" ? "Разовая" : "Регулярная"}
+👑 <b>Организатор:</b> ${userData.name}
+🐕 <b>Компаньон:</b> ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
 `;
 
       let previewMsg;
@@ -2869,9 +3252,12 @@ const editCityScene = new Scenes.WizardScene(
           });
 
           // После успешного изменения города показываем главное меню
-          await ctx.reply("Главное меню:", {
-            reply_markup: getMainMenuKeyboard(),
-          });
+          await ctx.reply(
+            "<b>Главное меню DogMeet</b> 🎮\n\n" + "Чем займемся сегодня?",
+            {
+              reply_markup: getMainMenuKeyboard(),
+            }
+          );
 
           return ctx.scene.leave(); // Выходим из сцены полностью
         }
@@ -3131,10 +3517,19 @@ const editDogSizeScene = new Scenes.WizardScene(
   async (ctx) => {
     const keyboard = {
       inline_keyboard: [
-        [{ text: "Маленькая 🐾 (до 10 кг)", callback_data: "size_small" }],
-        [{ text: "Средняя 🐕 (10–25 кг)", callback_data: "size_medium" }],
-        [{ text: "Крупная 🐕‍🦺 (25+ кг)", callback_data: "size_large" }],
-        [{ text: "❌ Отмена", callback_data: "cancel_edit" }],
+        [
+          {
+            text: "🐾 Маленькая (до 10 кг)",
+            callback_data: "size_small",
+          },
+        ],
+        [
+          {
+            text: "🐕 Средняя (10–25 кг)",
+            callback_data: "size_medium",
+          },
+        ],
+        [{ text: "🐕‍🦺 Крупная (25+ кг)", callback_data: "size_large" }],
       ],
     };
 
@@ -3393,7 +3788,9 @@ const editWalkDateTimeScene = new Scenes.WizardScene(
         } else if (data === "date_custom") {
           await updateWizardMessage(
             ctx,
-            "Введите дату в формате ДД.ММ.ГГГГ (только будущие даты):",
+            "<b>Когда отправляемся на поиски приключений?</b> 🗓️\n\n" +
+              "<i>Создавая прогулки, вы зарабатываете очки организатора и повышаете свой статус!</i>\n\n" +
+              "Введите дату в формате ДД.ММ.ГГГГ:",
             {
               inline_keyboard: [
                 [{ text: "❌ Отмена", callback_data: "cancel" }],
@@ -3441,7 +3838,7 @@ const editWalkDateTimeScene = new Scenes.WizardScene(
 
       // Если дата выбрана, переходим к выбору времени
       if (ctx.wizard.state.walkData.date) {
-        await updateWizardMessage(ctx, "Выберите час:", {
+        await updateWizardMessage(ctx, "Выберите идеальный час для встречи:", {
           inline_keyboard: [
             ...["6", "7", "8", "9", "10", "11", "12"].map((h) => [
               { text: h, callback_data: `hour_${h}` },
@@ -3744,7 +4141,7 @@ const editWalkLocationScene = new Scenes.WizardScene(
     const initResult = await initWalkEditScene(ctx, "editWalkLocation");
     if (!initResult.success) return ctx.scene.leave();
 
-    await updateWizardMessage(ctx, "Укажите новое место встречи:", {
+    await updateWizardMessage(ctx, "📍 Укажите новое место встречи:", {
       inline_keyboard: [
         [
           {
@@ -3752,7 +4149,6 @@ const editWalkLocationScene = new Scenes.WizardScene(
             callback_data: "current_location_walk",
           },
         ],
-        [{ text: "📍 Выбрать на карте", callback_data: "choose_map_walk" }],
         [{ text: "✏️ Ввести текстом", callback_data: "enter_location_text" }],
         [{ text: "❌ Отмена", callback_data: "cancel" }],
       ],
@@ -4053,15 +4449,20 @@ const editWalkTypeScene = new Scenes.WizardScene(
     const initResult = await initWalkEditScene(ctx, "editWalkType");
     if (!initResult.success) return ctx.scene.leave();
 
-    await updateWizardMessage(ctx, "Выберите тип прогулки:", {
-      inline_keyboard: [
-        [
-          { text: "Разовая 🔹", callback_data: "type_single" },
-          { text: "Регулярная 🔄", callback_data: "type_regular" },
+    await updateWizardMessage(
+      ctx,
+      "<b>Это будет единичное приключение или регулярная традиция?</b> 🔄\n" +
+        "<i>Регулярные прогулки помогают быстрее заработать звание Организатора и особые достижения!</i>",
+      {
+        inline_keyboard: [
+          [
+            { text: "Разовая 🔹", callback_data: "type_single" },
+            { text: "Регулярная 🔄", callback_data: "type_regular" },
+          ],
+          [{ text: "❌ Отмена", callback_data: "cancel" }],
         ],
-        [{ text: "❌ Отмена", callback_data: "cancel" }],
-      ],
-    });
+      }
+    );
 
     return ctx.wizard.next();
   },
@@ -4229,10 +4630,12 @@ bot.command("start", async (ctx) => {
     // Если пользователь новый, предлагаем зарегистрироваться
     const name = ctx.from.first_name || "гость";
     ctx.reply(
-      `Привет, ${name}! DogMeet помогает находить компанию для прогулок с собакой 🐶.\n` +
-        "🔹 Находите владельцев собак рядом.\n" +
-        "🔹 Создавайте прогулки в один клик.\n" +
-        "🔹 Присоединяйтесь к другим участникам.",
+      `Привет, ${name}! Добро пожаловать в <b>DogMeet</b> — место, где собаки находят друзей, а хозяева — единомышленников!  🐶.\n` +
+        "🔍 <b>Находите</b> собачьих друзей поблизости\n\n" +
+        "🗓️ <b>Создавайте</b> яркие прогулки одним взмахом лапы\n" +
+        "👋 <b>Присоединяйтесь</b> к сообществу любителей собак\n" +
+        "🏆 <b>Зарабатывайте</b> уникальные достижения и звания\n\n" +
+        "<i>Более 1000 владельцев собак уже встретились благодаря DogMeet!</i>",
       {
         reply_markup: {
           inline_keyboard: [
@@ -4404,6 +4807,135 @@ ${walk.organizer.username ? "@" + walk.organizer.username : ""}`;
   }
 });
 
+bot.action("show_all_badges", async (ctx) => {
+  try {
+    await ctx.answerCbQuery();
+
+    const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
+    if (!userDoc.exists) return;
+
+    const userData = userDoc.data();
+    if (
+      !userData.achievements ||
+      !userData.achievements.badges ||
+      userData.achievements.badges.length === 0
+    ) {
+      await updateWizardMessage(
+        ctx,
+        "У вас пока нет заработанных достижений. Присоединяйтесь к прогулкам, чтобы получить их!",
+        {
+          inline_keyboard: [
+            [{ text: "⬅️ Назад в профиль", callback_data: "my_profile" }],
+          ],
+        }
+      );
+      return;
+    }
+
+    // Сортируем бейджи по дате получения (новые вверху)
+    const sortedBadges = [...userData.achievements.badges].sort((a, b) => {
+      return new Date(b.earnedAt) - new Date(a.earnedAt);
+    });
+
+    // Формируем сообщение с достижениями
+    let message = "🏆 <b>Ваши достижения</b> 🏆\n\n";
+
+    sortedBadges.forEach((badge, index) => {
+      const date = new Date(badge.earnedAt).toLocaleDateString();
+      message += `${index + 1}. <b>${badge.name}</b> (${date})\n   ${badge.description}\n\n`;
+    });
+
+    await updateWizardMessage(ctx, message, {
+      parse_mode: "HTML",
+      inline_keyboard: [
+        [{ text: "⬅️ Назад в профиль", callback_data: "my_profile" }],
+      ],
+    });
+  } catch (error) {
+    console.error("Ошибка при показе достижений:", error);
+    await ctx.reply("Произошла ошибка при загрузке достижений.");
+  }
+});
+
+bot.action("show_rating", async (ctx) => {
+  await ctx.answerCbQuery();
+
+  try {
+    // Получаем всех пользователей
+    const usersSnapshot = await db.collection("users").get();
+
+    // Создаем массивы для участников и организаторов
+    const participants = [];
+    const organizers = [];
+
+    // Заполняем данные
+    usersSnapshot.forEach((doc) => {
+      const userData = doc.data();
+
+      if (userData.achievements) {
+        if (userData.achievements.walkCount > 0) {
+          participants.push({
+            name: userData.name,
+            rank: userData.achievements.participantRank,
+            count: userData.achievements.walkCount,
+          });
+        }
+
+        if (userData.achievements.organizedCount > 0) {
+          organizers.push({
+            name: userData.name,
+            rank: userData.achievements.organizerRank,
+            count: userData.achievements.organizedCount,
+          });
+        }
+      }
+    });
+
+    // Сортируем по количеству прогулок
+    participants.sort((a, b) => b.count - a.count);
+    organizers.sort((a, b) => b.count - a.count);
+
+    // Ограничиваем топ-10
+    const topParticipants = participants.slice(0, 10);
+    const topOrganizers = organizers.slice(0, 10);
+
+    // Формируем сообщение
+    let message = "🏆 <b>Рейтинг пользователей DogMeet</b>\n\n";
+
+    message += "<b>Топ участников прогулок:</b>\n";
+    if (topParticipants.length > 0) {
+      topParticipants.forEach((p, index) => {
+        message += `${index + 1}. ${p.name} - ${p.rank} (${p.count} прогулок)\n`;
+      });
+    } else {
+      message += "Пока нет участников с прогулками.\n";
+    }
+
+    message += "\n<b>Топ организаторов прогулок:</b>\n";
+    if (topOrganizers.length > 0) {
+      topOrganizers.forEach((o, index) => {
+        message += `${index + 1}. ${o.name} - ${o.rank} (${o.count} прогулок)\n`;
+      });
+    } else {
+      message += "Пока нет организаторов прогулок.\n";
+    }
+
+    await updateWizardMessage(ctx, message, {
+      parse_mode: "HTML",
+      inline_keyboard: [
+        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+      ],
+    });
+  } catch (error) {
+    console.error("Ошибка при получении рейтинга:", error);
+    await updateWizardMessage(ctx, "Произошла ошибка при получении рейтинга", {
+      inline_keyboard: [
+        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+      ],
+    });
+  }
+});
+
 // Обработчик для возврата к выбору города
 bot.action("back_to_city_selection", async (ctx) => {
   await ctx.answerCbQuery();
@@ -4415,7 +4947,9 @@ bot.action("back_to_city_selection", async (ctx) => {
       ]),
       [
         {
-          text: "📍 Отправить геолокацию (рекомендуется)",
+          text:
+            "📍 Отправить геолокацию (рекомендуется)\n" +
+            "<i>(Геолокация поможет находить прогулки в пешей доступности)</i>",
           callback_data: "send_location_reg",
         },
       ],
@@ -4451,6 +4985,7 @@ bot.action("cancel_walk", async (ctx) => {
 });
 
 // Обработчик для главного меню
+// Модифицируем функцию главного меню
 function getMainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -4462,7 +4997,10 @@ function getMainMenuKeyboard() {
         { text: "📋 Мои прогулки", callback_data: "my_walks" },
         { text: "👥 Где я участвую", callback_data: "my_participations" },
       ],
-      [{ text: "👤 Мой профиль", callback_data: "my_profile" }],
+      [
+        { text: "👤 Мой профиль", callback_data: "my_profile" },
+        { text: "🏆 Рейтинг", callback_data: "show_rating" },
+      ],
     ],
   };
 }
@@ -4526,25 +5064,65 @@ bot.action("my_profile", async (ctx) => {
     }
 
     const userData = userDoc.data();
+    const achievements = userData.achievements || {
+      walkCount: 0,
+      organizedCount: 0,
+      participantRank: "Хвостик",
+      organizerRank: "Мокрый нос",
+      badges: [],
+    };
+
+    // Проверяем специальный статус
+    let specialStatusText = "";
+    if (achievements.specialStatus && achievements.specialStatus.title) {
+      const expiryDate = achievements.specialStatus.expiresAt
+        ? new Date(achievements.specialStatus.expiresAt)
+        : null;
+      if (expiryDate && expiryDate > new Date()) {
+        specialStatusText = `\n🌟 Особый статус: ${achievements.specialStatus.title}`;
+      } else {
+        // Если статус истек, удаляем его
+        db.collection("users").doc(String(ctx.from.id)).update({
+          "achievements.specialStatus.title": null,
+          "achievements.specialStatus.expiresAt": null,
+        });
+      }
+    }
+
+    // Формируем текст последних достижений
+    let badgesText = "";
+    if (achievements.badges && achievements.badges.length > 0) {
+      const latestBadges = achievements.badges.slice(-2); // Показываем только последние 2 значка для краткости
+      badgesText = "\n🏅 Последние достижения: ";
+      latestBadges.forEach((badge, index) => {
+        badgesText +=
+          `${badge.name}` + (index < latestBadges.length - 1 ? ", " : "");
+      });
+    }
 
     const profileText = `
-👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
+🐕 <b>КАРТОЧКА СОБАКОВОДА</b> 🐕
+
+👤 <b>${userData.name}</b> ${userData.username ? "@" + userData.username : ""}
+📊 <b>Звания:</b>
+   Участник: ${achievements.participantRank}
+   Организатор: ${achievements.organizerRank}
+🦴 Прогулок: ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
+
 📍 Город: ${userData.city}
 🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+${badgesText}
     `;
-
-    // Добавляем невидимый маркер к тексту, чтобы избежать ошибки "message is not modified"
-    const uniqueMarker = `\u200B${Date.now().toString().slice(-5)}`;
-    const modifiedText = profileText + uniqueMarker;
 
     // Пытаемся редактировать сообщение напрямую, используя ID из callbackQuery
     if (messageId) {
       try {
+        // Здесь удаляем маркер и используем прямой текст
         await ctx.telegram.editMessageText(
           ctx.chat.id,
           messageId,
           null,
-          modifiedText,
+          profileText,
           {
             parse_mode: "HTML",
             reply_markup: {
@@ -4553,6 +5131,10 @@ bot.action("my_profile", async (ctx) => {
                   {
                     text: "✏️ Редактировать профиль",
                     callback_data: "edit_profile_menu",
+                  },
+                  {
+                    text: "🏆 Все достижения",
+                    callback_data: "show_all_badges",
                   },
                 ],
                 [
@@ -4591,6 +5173,10 @@ bot.action("my_profile", async (ctx) => {
             {
               text: "✏️ Редактировать профиль",
               callback_data: "edit_profile_menu",
+            },
+            {
+              text: "🏆 Все достижения",
+              callback_data: "show_all_badges",
             },
           ],
           [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
@@ -5741,11 +6327,11 @@ bot.action("type_single", async (ctx) => {
 
     // Формируем превью карточки прогулки
     let previewText = `
-  🗓 Прогулка: ${ctx.wizard.state.walkData.date}, ${ctx.wizard.state.walkData.time}
-  📍 Место: ${ctx.wizard.state.walkData.locationText || "По геолокации"}
-  🔄 Тип: Разовая
-  👤 Организатор: ${userData.name}
-  🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+  🗓️ <b>Встреча:</b> ${ctx.wizard.state.walkData.date}, ${ctx.wizard.state.walkData.time}
+ 📍 <b>Место сбора:</b> ${ctx.wizard.state.walkData.locationText || "По геолокации"}
+  🔄 <b>Формат:</b>  Разовая
+ 👑 <b>Организатор:</b> ${userData.name}
+🐕 <b>Компаньон:</b> ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
   `;
 
     // Отправляем превью
@@ -5764,7 +6350,7 @@ bot.action("type_single", async (ctx) => {
       });
 
       // Удаляем обычную клавиатуру
-      await ctx.reply("Превью прогулки:", Markup.removeKeyboard());
+      await ctx.reply("✨ <b>АНОНС ПРОГУЛКИ</b> ✨", Markup.removeKeyboard());
     } else {
       await ctx.reply(previewText, {
         parse_mode: "HTML",
@@ -5805,15 +6391,15 @@ bot.action("type_regular", async (ctx) => {
 
     // Формируем превью карточки прогулки
     let previewText = `
-  🗓 Прогулка: ${ctx.wizard.state.walkData.date}, ${ctx.wizard.state.walkData.time}
-  📍 Место: ${ctx.wizard.state.walkData.locationText || "По геолокации"}
-  🔄 Тип: Регулярная
-  👤 Организатор: ${userData.name}
-  🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+  🗓️ <b>Встреча:</b>  ${ctx.wizard.state.walkData.date}, ${ctx.wizard.state.walkData.time}
+  📍 <b>Место сбора:</b> ${ctx.wizard.state.walkData.locationText || "По геолокации"}
+  🔄 <b>Формат:</b> Регулярная
+  👑 <b>Организатор:</b> ${userData.name}
+  🐕 <b>Компаньон:</b> ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
   `;
 
     // Удаляем обычную клавиатуру
-    await ctx.reply("Превью прогулки:", Markup.removeKeyboard());
+    await ctx.reply("✨ <b>АНОНС ПРОГУЛКИ</b> ✨", Markup.removeKeyboard());
 
     // Отправляем превью
     if (userData.dog.photoId) {
@@ -5874,6 +6460,20 @@ bot.action("skip_photo", async (ctx) => {
 
   const userData = ctx.wizard.state.userData;
 
+  // Инициализируем структуру достижений
+  const achievements = {
+    walkCount: 0,
+    organizedCount: 0,
+    participantRank: "Хвостик",
+    organizerRank: "Мокрый нос",
+    badges: [],
+    specialStatus: {
+      title: null,
+      expiresAt: null,
+    },
+    lastUpdated: new Date(),
+  };
+
   // Сохраняем данные пользователя в базу данных без фото
   const user = {
     id: ctx.from.id,
@@ -5888,17 +6488,21 @@ bot.action("skip_photo", async (ctx) => {
       age: userData.dogAge,
       photoId: null,
     },
-    walkHistory: {
-      joinedWithOrganizers: [],
-      lastUpdated: new Date(),
-    },
+    // Заменяем walkHistory на achievements
+    achievements: achievements,
     createdAt: new Date(),
   };
 
   try {
     await db.collection("users").doc(String(ctx.from.id)).set(user);
     ctx.reply(
-      "✅ Профиль создан! Теперь вы можете создавать прогулки или присоединяться к другим.",
+      "<b>🎉 УРА! ПРОФИЛЬ СОЗДАН! 🎉</b> \n\n" +
+        '🏆 Вы получили звание "<b>Хвостик</b>" и свой первый бейдж "<b>Новичок</b>"!\n\n' +
+        "🐾 Теперь вы можете:\n" +
+        "- Создавать веселые прогулки\n" +
+        "- Искать новых друзей поблизости \n" +
+        "- Зарабатывать достижения и повышать уровень\n\n" +
+        "<i>Готовы к первой прогулке? Начните прямо сейчас!</i>",
       { reply_markup: getMainMenuKeyboard() }
     );
   } catch (error) {
@@ -5918,11 +6522,22 @@ bot.action(/breed_(.+)/, (ctx) => {
   } else {
     ctx.wizard.state.userData.dogBreed = breed;
     ctx.reply(
-      "Какого размера ваша собака?",
+      "<b>Размер имеет значение!</b> 📏 \n\n" +
+        "Подберем подходящую компанию для вашего питомца:",
       Markup.inlineKeyboard([
-        [{ text: "Маленькая", callback_data: "size_small" }],
-        [{ text: "Средняя", callback_data: "size_medium" }],
-        [{ text: "Большая", callback_data: "size_large" }],
+        [
+          {
+            text: "🐾 Маленькая (до 10 кг)",
+            callback_data: "size_small",
+          },
+        ],
+        [
+          {
+            text: "🐕 Средняя (10–25 кг)",
+            callback_data: "size_medium",
+          },
+        ],
+        [{ text: "🐕‍🦺 Крупная (25+ кг)", callback_data: "size_large" }],
       ])
     );
     return ctx.wizard.next();
@@ -6242,11 +6857,48 @@ editProfileMenuScene.action("my_profile", async (ctx) => {
     // Вернуться к отображению профиля
     const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
     const userData = userDoc.data();
+    const achievements = userData.achievements || {
+      walkCount: 0,
+      organizedCount: 0,
+      participantRank: "Хвостик",
+      organizerRank: "Мокрый нос",
+      badges: [],
+    };
+
+    // Проверяем специальный статус
+    let specialStatusText = "";
+    if (achievements.specialStatus && achievements.specialStatus.title) {
+      const expiryDate = achievements.specialStatus.expiresAt
+        ? new Date(achievements.specialStatus.expiresAt)
+        : null;
+      if (expiryDate && expiryDate > new Date()) {
+        specialStatusText = `\n🌟 Особый статус: ${achievements.specialStatus.title}`;
+      }
+    }
+
+    // Формируем текст последних достижений
+    let badgesText = "";
+    if (achievements.badges && achievements.badges.length > 0) {
+      const latestBadges = achievements.badges.slice(-2); // Показываем только последние 2 значка для краткости
+      badgesText = "\n🏅 Последние достижения: ";
+      latestBadges.forEach((badge, index) => {
+        badgesText +=
+          `${badge.name}` + (index < latestBadges.length - 1 ? ", " : "");
+      });
+    }
 
     const profileText = `
-👤 Имя: ${userData.name} ${userData.username ? "@" + userData.username : ""}
+🐕 <b>КАРТОЧКА СОБАКОВОДА</b> 🐕
+
+👤 <b>${userData.name}</b> ${userData.username ? "@" + userData.username : ""}
+📊 <b>Звания:</b>
+   Участник: ${achievements.participantRank}
+   Организатор: ${achievements.organizerRank}
+🦴 Прогулок: ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
+
 📍 Город: ${userData.city}
 🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+${badgesText}
     `;
 
     const keyboard = {
@@ -6255,6 +6907,10 @@ editProfileMenuScene.action("my_profile", async (ctx) => {
           {
             text: "✏️ Редактировать профиль",
             callback_data: "edit_profile_menu",
+          },
+          {
+            text: "🏆 Все достижения",
+            callback_data: "show_all_badges",
           },
         ],
         [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
