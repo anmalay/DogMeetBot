@@ -620,12 +620,16 @@ async function notifyNearbyUsers(walkId, organizer, walkData) {
 }
 
 // Функция для напоминания о предстоящих прогулках и удаления прошедших
+/**
+ * Обрабатывает прошедшие прогулки и отправляет напоминания о предстоящих
+ */
 async function remindAboutWalks() {
   const now = new Date();
   const today = moment(now).format("DD.MM.YYYY");
 
   // Получаем все прогулки
   const walksSnapshot = await db.collection("walks").get();
+  console.log(`Проверка ${walksSnapshot.docs.length} прогулок на ${today}`);
 
   for (const walkDoc of walksSnapshot.docs) {
     const walk = walkDoc.data();
@@ -633,7 +637,7 @@ async function remindAboutWalks() {
 
     // Парсим время прогулки
     const [hours, minutes] = walk.time.split(":").map(Number);
-    const walkTime = new Date(now);
+    const walkTime = new Date();
 
     // Парсим дату прогулки
     const [day, month, year] = walk.date.split(".").map(Number);
@@ -643,19 +647,58 @@ async function remindAboutWalks() {
     // Проверяем, что прогулка уже прошла и прошло более часа
     const timeDiffMinutes = Math.round((now - walkTime) / (1000 * 60));
 
-    // Если это разовая прогулка, которая закончилась более часа назад, удаляем её
+    // Обрабатываем разовые прогулки
     if (walk.type === "single" && timeDiffMinutes > 60) {
-      // Проверяем, есть ли уже статус у прогулки
+      // Проверяем, не архивирована ли уже прогулка
       if (!walk.status || walk.status !== "archived") {
         await db.collection("walks").doc(walkId).update({
           status: "archived",
           archivedAt: new Date(),
         });
         console.log(
-          `Прогулка ${walkId} помечена как архивная (прошла более часа назад)`
+          `Прогулка ${walkId} архивирована (прошла более часа назад)`
         );
       }
-      continue; // Переходим к следующей прогулке
+      continue;
+    }
+
+    // Обрабатываем регулярные прогулки
+    if (
+      walk.type === "regular" &&
+      walk.date === today &&
+      timeDiffMinutes > 60
+    ) {
+      // Создаем или обновляем массив прошедших экземпляров регулярной прогулки
+      const lastOccurrences = walk.lastOccurrences || [];
+      const isTodayCompleted = lastOccurrences.some(
+        (occurrence) => occurrence.date === today
+      );
+
+      if (!isTodayCompleted) {
+        // Добавляем сегодняшнюю дату как завершенную
+        const updatedOccurrences = [
+          ...lastOccurrences,
+          {
+            date: today,
+            status: "completed",
+            completedAt: new Date(),
+          },
+        ];
+
+        // Ограничиваем размер истории (хранить последние 30 дней)
+        if (updatedOccurrences.length > 30) {
+          updatedOccurrences.shift();
+        }
+
+        await db.collection("walks").doc(walkId).update({
+          lastOccurrences: updatedOccurrences,
+        });
+
+        console.log(
+          `Регулярная прогулка ${walkId} отмечена как завершенная на ${today}`
+        );
+      }
+      continue;
     }
 
     // Напоминание о предстоящей прогулке (только для прогулок сегодня)
@@ -666,20 +709,37 @@ async function remindAboutWalks() {
       if (timeToWalkMinutes > 14 && timeToWalkMinutes < 16) {
         // Отправляем напоминания всем участникам и организатору
         const reminderText = `
-  🔔 Напоминание: у вас прогулка через 15 минут!
-  🗓 ${walk.date}, ${walk.time}
-  📍 ${walk.locationText || "По геолокации"}
-  `;
+🔔 Напоминание: у вас прогулка через 15 минут!
+🗓 ${walk.date}, ${walk.time}
+📍 ${walk.locationText || "По геолокации"}
+`;
 
         // Уведомляем организатора
-        await bot.telegram.sendMessage(walk.organizer.id, reminderText, {
-          reply_markup: getMainMenuKeyboard(),
-        });
-        // Уведомляем всех участников
-        for (const participant of walk.participants) {
-          await bot.telegram.sendMessage(participant.id, reminderText, {
+        try {
+          await bot.telegram.sendMessage(walk.organizer.id, reminderText, {
             reply_markup: getMainMenuKeyboard(),
           });
+        } catch (error) {
+          console.error(
+            `Ошибка при отправке напоминания организатору ${walk.organizer.id}:`,
+            error
+          );
+        }
+
+        // Уведомляем всех участников
+        if (walk.participants && Array.isArray(walk.participants)) {
+          for (const participant of walk.participants) {
+            try {
+              await bot.telegram.sendMessage(participant.id, reminderText, {
+                reply_markup: getMainMenuKeyboard(),
+              });
+            } catch (error) {
+              console.error(
+                `Ошибка при отправке напоминания участнику ${participant.id}:`,
+                error
+              );
+            }
+          }
         }
       }
     }
@@ -1275,15 +1335,24 @@ function isValidDate(dateStr) {
     return false;
   }
 
-  // Дополнительная проверка валидности даты
+  // Проверка валидности даты
   const [day, month, year] = dateStr.split(".").map(Number);
   const date = new Date(year, month - 1, day);
 
-  return (
-    date.getFullYear() === year &&
-    date.getMonth() === month - 1 &&
-    date.getDate() === day
-  );
+  // Проверка существования даты в календаре
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return false;
+  }
+
+  // Проверка, что дата не из прошлого
+  const today = new Date();
+  today.setHours(0, 0, 0, 0); // Сбрасываем время, чтобы сравнивать только даты
+
+  return date >= today;
 }
 
 async function notifyWalkParticipants(participants, message) {
@@ -1844,7 +1913,7 @@ const createWalkScene = new Scenes.WizardScene(
     return ctx.wizard.next();
   },
 
-  // Шаг 2: Обработка выбора даты
+  // Шаг 2: Обработка выбора даты в сцене создания прогулки
   async (ctx) => {
     // Обработка кнопки отмены
     if (ctx.callbackQuery && ctx.callbackQuery.data === "cancel") {
@@ -1869,15 +1938,20 @@ const createWalkScene = new Scenes.WizardScene(
           .add(1, "days")
           .format("DD.MM.YYYY");
       } else if (data === "date_custom") {
-        await updateWizardMessage(ctx, "Введите дату в формате ДД.ММ.ГГГГ:", {
-          inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel" }]],
-        });
+        await updateWizardMessage(
+          ctx,
+          "Введите дату в формате ДД.ММ.ГГГГ (только будущие даты):",
+          {
+            inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel" }]],
+          }
+        );
         ctx.wizard.state.customDate = true;
         return;
       }
     }
     // Обработка ввода произвольной даты
     else if (ctx.message && ctx.message.text) {
+      // Проверяем валидность даты и что она не из прошлого
       if (!isValidDate(ctx.message.text)) {
         // Удаляем сообщение пользователя
         try {
@@ -1888,7 +1962,7 @@ const createWalkScene = new Scenes.WizardScene(
 
         await updateWizardMessage(
           ctx,
-          "Пожалуйста, введите корректную дату в формате ДД.ММ.ГГГГ:",
+          "Пожалуйста, введите корректную будущую дату в формате ДД.ММ.ГГГГ:",
           {
             inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel" }]],
           }
@@ -3317,11 +3391,17 @@ const editWalkDateTimeScene = new Scenes.WizardScene(
             .add(1, "days")
             .format("DD.MM.YYYY");
         } else if (data === "date_custom") {
-          await updateWizardMessage(ctx, "Введите дату в формате ДД.ММ.ГГГГ:", {
-            inline_keyboard: [[{ text: "❌ Отмена", callback_data: "cancel" }]],
-          });
+          await updateWizardMessage(
+            ctx,
+            "Введите дату в формате ДД.ММ.ГГГГ (только будущие даты):",
+            {
+              inline_keyboard: [
+                [{ text: "❌ Отмена", callback_data: "cancel" }],
+              ],
+            }
+          );
           ctx.wizard.state.customDate = true;
-          return;
+          retur;
         }
       }
       // Обработка ввода даты текстом
