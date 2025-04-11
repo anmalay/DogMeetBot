@@ -11,7 +11,8 @@ require("dotenv").config();
 let BOT_START_TIME = Date.now();
 
 // Инициализация Firebase
-const serviceAccount = require("./serviceAccountKey.json");
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
 initializeApp({
   credential: cert(serviceAccount),
 });
