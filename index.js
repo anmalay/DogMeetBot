@@ -7173,8 +7173,8 @@ editProfileMenuScene.action("my_profile", async (ctx) => {
 
 👤 <b>${userData.name}</b> ${userData.username ? "@" + userData.username : ""}
 📊 <b>Звания:</b>
-   Участник: ${achievements.participantRank}
-   Организатор: ${achievements.organizerRank}
+   Участник: ${achievements.userRank}
+   Организатор: ${achievements.organizerBadge}
 🦴 Прогулок: ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
 
 📍 Город: ${userData.city}
