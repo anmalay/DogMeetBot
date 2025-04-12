@@ -618,36 +618,29 @@ ${badgesText}
       ],
     };
 
-    // ВАЖНО: Удаляем все предыдущие сообщения с профилем, чтобы не было дублирования
-    if (ctx.session && ctx.session.lastMessageId) {
-      try {
-        await ctx.deleteMessage(ctx.session.lastMessageId);
-      } catch (error) {
-        console.log("Не удалось удалить предыдущее сообщение:", error);
-      }
-    }
-
-    // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Всегда отправляем профиль как новое сообщение
-    let msg;
-
+    // Если у собаки есть фото, отправляем информацию вместе с фото
     if (userData.dog && userData.dog.photoId) {
-      // Если есть фото - отправляем фото с подписью и кнопками
-      msg = await ctx.replyWithPhoto(userData.dog.photoId, {
+      // Отправляем фото с подписью
+      const photoMsg = await ctx.replyWithPhoto(userData.dog.photoId, {
         caption: profileText,
         parse_mode: "HTML",
-        reply_markup: keyboard,
+        reply_markup: { inline_keyboard: keyboard.inline_keyboard },
       });
+
+      // Сохраняем ID сообщения с фото
+      if (!ctx.session) ctx.session = {};
+      ctx.session.lastMessageId = photoMsg.message_id;
     } else {
-      // Если фото нет - отправляем только текст и кнопки
-      msg = await ctx.reply(profileText, {
+      // Если нет фото, просто обновляем текущее сообщение
+      const msg = await ctx.reply(profileText, {
         parse_mode: "HTML",
         reply_markup: keyboard,
       });
-    }
 
-    // Сохраняем ID сообщения для будущих обновлений
-    if (!ctx.session) ctx.session = {};
-    ctx.session.lastMessageId = msg.message_id;
+      // Сохраняем ID сообщения
+      if (!ctx.session) ctx.session = {};
+      ctx.session.lastMessageId = msg.message_id;
+    }
   } catch (error) {
     console.error("Ошибка при отображении профиля:", error);
     throw error;
@@ -5301,9 +5294,14 @@ bot.action("my_profile", async (ctx) => {
           ? ctx.session.lastMessageId
           : null;
 
-    // Сохраняем ID сообщения для будущих обновлений
-    if (!ctx.session) ctx.session = {};
-    ctx.session.lastMessageId = messageId;
+    // Удаляем предыдущее сообщение, если оно есть
+    if (messageId) {
+      try {
+        await ctx.deleteMessage(messageId);
+      } catch (error) {
+        console.log("Не удалось удалить предыдущее сообщение:", error);
+      }
+    }
 
     const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
 
@@ -5374,95 +5372,49 @@ bot.action("my_profile", async (ctx) => {
       ${badgesText}
           `;
 
-    // Пытаемся редактировать сообщение напрямую, используя ID из callbackQuery
-    if (messageId) {
-      try {
-        // Здесь удаляем маркер и используем прямой текст
-        await ctx.telegram.editMessageText(
-          ctx.chat.id,
-          messageId,
-          null,
-          profileText,
+    const keyboard = {
+      inline_keyboard: [
+        [
           {
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [
-                [
-                  {
-                    text: "✏️ Редактировать профиль",
-                    callback_data: "edit_profile_menu",
-                  },
-                  {
-                    text: "🏆 Все достижения",
-                    callback_data: "show_all_badges",
-                  },
-                ],
-                [
-                  {
-                    text: "❓ Как работают звания",
-                    callback_data: "ranks_info",
-                  },
-                ],
-                [
-                  {
-                    text: "⬅️ Назад в меню",
-                    callback_data: "back_to_main_menu",
-                  },
-                ],
-              ],
-            },
-          }
-        );
-
-        // Если у собаки есть фото, показываем его отдельным сообщением
-        if (userData.dog && userData.dog.photoId) {
-          // Проверяем, было ли уже отправлено фото в этом контексте
-          if (!ctx.session.dogPhotoShown) {
-            await ctx.replyWithPhoto(userData.dog.photoId);
-            ctx.session.dogPhotoShown = true;
-          }
-        }
-
-        return;
-      } catch (error) {
-        console.log("Не удалось обновить сообщение:", error);
-        // В случае ошибки продолжаем и отправляем новое сообщение
-      }
-    }
-
-    // Если редактирование не удалось, отправляем новое сообщение
-    const msg = await ctx.reply(profileText, {
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "✏️ Редактировать профиль",
-              callback_data: "edit_profile_menu",
-            },
-            {
-              text: "🏆 Все достижения",
-              callback_data: "show_all_badges",
-            },
-          ],
-          [
-            {
-              text: "❓ Как работают звания",
-              callback_data: "ranks_info",
-            },
-          ],
-          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+            text: "✏️ Редактировать профиль",
+            callback_data: "edit_profile_menu",
+          },
+          {
+            text: "🏆 Все достижения",
+            callback_data: "show_all_badges",
+          },
         ],
-      },
-    });
+        [
+          {
+            text: "❓ Как работают звания",
+            callback_data: "ranks_info",
+          },
+        ],
+        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+      ],
+    };
 
-    // Сохраняем ID нового сообщения
-    ctx.session.lastMessageId = msg.message_id;
-
-    // Если у собаки есть фото, показываем его отдельным сообщением
+    // Если у собаки есть фото, отправляем с фото
     if (userData.dog && userData.dog.photoId) {
-      await ctx.replyWithPhoto(userData.dog.photoId);
-      ctx.session.dogPhotoShown = true;
+      // Отправляем фото с подписью
+      const photoMsg = await ctx.replyWithPhoto(userData.dog.photoId, {
+        caption: profileText,
+        parse_mode: "HTML",
+        reply_markup: { inline_keyboard: keyboard.inline_keyboard },
+      });
+
+      // Сохраняем ID сообщения
+      if (!ctx.session) ctx.session = {};
+      ctx.session.lastMessageId = photoMsg.message_id;
+    } else {
+      // Если редактирование не удалось, отправляем новое сообщение
+      const msg = await ctx.reply(profileText, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+
+      // Сохраняем ID нового сообщения
+      ctx.session.lastMessageId = msg.message_id;
     }
   } catch (error) {
     console.error("Ошибка при отображении профиля:", error);
@@ -6166,21 +6118,20 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
     // Уведомляем организатора о новом участнике
     try {
       const notificationText = `
-📢 Новый участник в вашей прогулке!
+📢 <b>Новый участник в вашей прогулке!</b>
 👤 ${userData.name}
 🐕 ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
 📩 Контакт: ${ctx.from.username ? "@" + ctx.from.username : "Нет username"}
 `;
 
-      if (userData.dog.photoId) {
-        // Если есть фото - отправляем фото с текстом в caption
+      // По аналогии с деталями прогулок
+      if (userData.dog && userData.dog.photoId) {
         await bot.telegram.sendPhoto(walk.organizer.id, userData.dog.photoId, {
           caption: notificationText,
           parse_mode: "HTML",
           reply_markup: getMainMenuKeyboard(),
         });
       } else {
-        // Если фото нет - отправляем только текст
         await bot.telegram.sendMessage(walk.organizer.id, notificationText, {
           parse_mode: "HTML",
           reply_markup: getMainMenuKeyboard(),
