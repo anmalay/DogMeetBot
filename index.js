@@ -618,56 +618,34 @@ ${badgesText}
       ],
     };
 
-    // Если это ответ на callback, пытаемся редактировать сообщение
-    if (ctx.callbackQuery) {
+    // ВАЖНО: Удаляем все предыдущие сообщения с профилем, чтобы не было дублирования
+    if (ctx.session && ctx.session.lastMessageId) {
       try {
-        // Если у собаки есть фото, используем его для профиля
-        if (userData.dog && userData.dog.photoId) {
-          const photoMsg = await ctx.replyWithPhoto(userData.dog.photoId, {
-            caption: profileText,
-            parse_mode: "HTML",
-            reply_markup: keyboard,
-          });
-
-          // Сохраняем ID сообщения в сессии
-          if (!ctx.session) ctx.session = {};
-          ctx.session.lastMessageId = photoMsg.message_id;
-        } else {
-          // Если фото нет, редактируем только текст
-          await ctx.editMessageText(profileText, {
-            parse_mode: "HTML",
-            reply_markup: keyboard,
-          });
-
-          // Сохраняем ID сообщения в сессии
-          if (!ctx.session) ctx.session = {};
-          ctx.session.lastMessageId = ctx.callbackQuery.message.message_id;
-        }
-        return;
+        await ctx.deleteMessage(ctx.session.lastMessageId);
       } catch (error) {
-        console.log("Не удалось отредактировать сообщение:", error);
-        // Если редактирование не удалось, отправим новое сообщение
+        console.log("Не удалось удалить предыдущее сообщение:", error);
       }
     }
 
-    // Отправляем сообщение (только если не смогли отредактировать)
+    // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Всегда отправляем профиль как новое сообщение
     let msg;
+
     if (userData.dog && userData.dog.photoId) {
-      // Если есть фото, отправляем с текстом профиля
+      // Если есть фото - отправляем фото с подписью и кнопками
       msg = await ctx.replyWithPhoto(userData.dog.photoId, {
         caption: profileText,
         parse_mode: "HTML",
         reply_markup: keyboard,
       });
     } else {
-      // Если фото нет, отправляем только текст
+      // Если фото нет - отправляем только текст и кнопки
       msg = await ctx.reply(profileText, {
         parse_mode: "HTML",
         reply_markup: keyboard,
       });
     }
 
-    // Сохраняем ID сообщения в сессии
+    // Сохраняем ID сообщения для будущих обновлений
     if (!ctx.session) ctx.session = {};
     ctx.session.lastMessageId = msg.message_id;
   } catch (error) {
@@ -675,7 +653,6 @@ ${badgesText}
     throw error;
   }
 }
-
 // Функция для обновления сообщения вместо отправки нового
 // Улучшенная функция обновления сообщений для исправления проблемы с контекстом кнопок
 async function updateWizardMessage(ctx, text, keyboard = null) {
@@ -5134,7 +5111,7 @@ bot.action("show_rating", async (ctx) => {
         if (userData.achievements.walkCount > 0) {
           participants.push({
             name: userData.name,
-            username: userData.username, // Добавляем username в данные
+            username: userData.username,
             rank: userData.achievements.userRank,
             count: userData.achievements.walkCount,
           });
@@ -5143,7 +5120,7 @@ bot.action("show_rating", async (ctx) => {
         if (userData.achievements.organizedCount > 0) {
           organizers.push({
             name: userData.name,
-            username: userData.username, // Добавляем username в данные
+            username: userData.username,
             rank: userData.achievements.organizerBadge || "Организатор",
             count: userData.achievements.organizedCount,
           });
@@ -5159,15 +5136,30 @@ bot.action("show_rating", async (ctx) => {
     const topParticipants = participants.slice(0, 10);
     const topOrganizers = organizers.slice(0, 10);
 
+    // Функция для получения эмодзи места
+    const getPlaceEmoji = (index) => {
+      switch (index) {
+        case 0:
+          return "🥇 "; // Золотая медаль для 1 места
+        case 1:
+          return "🥈 "; // Серебряная медаль для 2 места
+        case 2:
+          return "🥉 "; // Бронзовая медаль для 3 места
+        default:
+          return `${index + 1}. `;
+      }
+    };
+
     // Формируем сообщение
     let message = "🏆 <b>Рейтинг пользователей DogMeet</b>\n\n";
 
     message += "<b>Топ участников прогулок:</b>\n";
     if (topParticipants.length > 0) {
       topParticipants.forEach((p, index) => {
-        // Добавляем username к имени, если он существует
         const usernameDisplay = p.username ? ` (@${p.username})` : "";
-        message += `${index + 1}. ${p.name}${usernameDisplay} - ${p.rank} (${p.count} прогулок)\n`;
+        // Используем эмодзи для первых трех мест
+        const placePrefix = getPlaceEmoji(index);
+        message += `${placePrefix}${p.name}${usernameDisplay} - ${p.rank} (${p.count} прогулок)\n`;
       });
     } else {
       message += "Пока нет участников с прогулками.\n";
@@ -5176,9 +5168,10 @@ bot.action("show_rating", async (ctx) => {
     message += "\n<b>Топ организаторов прогулок:</b>\n";
     if (topOrganizers.length > 0) {
       topOrganizers.forEach((o, index) => {
-        // Добавляем username к имени, если он существует
         const usernameDisplay = o.username ? ` (@${o.username})` : "";
-        message += `${index + 1}. ${o.name}${usernameDisplay} - ${o.rank} (${o.count} прогулок)\n`;
+        // Используем эмодзи для первых трех мест
+        const placePrefix = getPlaceEmoji(index);
+        message += `${placePrefix}${o.name}${usernameDisplay} - ${o.rank} (${o.count} прогулок)\n`;
       });
     } else {
       message += "Пока нет организаторов прогулок.\n";
@@ -6172,20 +6165,26 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
 
     // Уведомляем организатора о новом участнике
     try {
-      await bot.telegram.sendMessage(
-        walk.organizer.id,
-        `
+      const notificationText = `
 📢 Новый участник в вашей прогулке!
 👤 ${userData.name}
 🐕 ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
 📩 Контакт: ${ctx.from.username ? "@" + ctx.from.username : "Нет username"}
-`,
-        { reply_markup: getMainMenuKeyboard() }
-      );
+`;
 
-      // Если у собаки участника есть фото, отправляем его организатору
       if (userData.dog.photoId) {
-        await bot.telegram.sendPhoto(walk.organizer.id, userData.dog.photoId);
+        // Если есть фото - отправляем фото с текстом в caption
+        await bot.telegram.sendPhoto(walk.organizer.id, userData.dog.photoId, {
+          caption: notificationText,
+          parse_mode: "HTML",
+          reply_markup: getMainMenuKeyboard(),
+        });
+      } else {
+        // Если фото нет - отправляем только текст
+        await bot.telegram.sendMessage(walk.organizer.id, notificationText, {
+          parse_mode: "HTML",
+          reply_markup: getMainMenuKeyboard(),
+        });
       }
     } catch (error) {
       console.error("Ошибка при отправке уведомления организатору:", error);
@@ -6204,7 +6203,6 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
     );
   }
 });
-
 // Покинуть прогулку
 bot.action(/leave_walk_(.+)/, async (ctx) => {
   try {
