@@ -596,37 +596,53 @@ async function showProfile(ctx) {
 ${badgesText}
     `;
 
+    const keyboard = {
+      inline_keyboard: [
+        [
+          {
+            text: "✏️ Редактировать профиль",
+            callback_data: "edit_profile_menu",
+          },
+          {
+            text: "🏆 Все достижения",
+            callback_data: "show_all_badges",
+          },
+        ],
+        [
+          {
+            text: "❓ Как работают звания",
+            callback_data: "ranks_info",
+          },
+        ],
+        [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
+      ],
+    };
+
     // Если это ответ на callback, пытаемся редактировать сообщение
     if (ctx.callbackQuery) {
       try {
-        await ctx.editMessageText(profileText, {
-          parse_mode: "HTML",
-          reply_markup: {
-            inline_keyboard: [
-              [
-                {
-                  text: "✏️ Редактировать профиль",
-                  callback_data: "edit_profile_menu",
-                },
-                {
-                  text: "🏆 Все достижения",
-                  callback_data: "show_all_badges",
-                },
-              ],
-              [
-                {
-                  text: "❓ Как работают звания",
-                  callback_data: "ranks_info",
-                },
-              ],
-              [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
-            ],
-          },
-        });
+        // Если у собаки есть фото, используем его для профиля
+        if (userData.dog && userData.dog.photoId) {
+          const photoMsg = await ctx.replyWithPhoto(userData.dog.photoId, {
+            caption: profileText,
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+          });
 
-        // Сохраняем ID сообщения в сессии
-        if (!ctx.session) ctx.session = {};
-        ctx.session.lastMessageId = ctx.callbackQuery.message.message_id;
+          // Сохраняем ID сообщения в сессии
+          if (!ctx.session) ctx.session = {};
+          ctx.session.lastMessageId = photoMsg.message_id;
+        } else {
+          // Если фото нет, редактируем только текст
+          await ctx.editMessageText(profileText, {
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+          });
+
+          // Сохраняем ID сообщения в сессии
+          if (!ctx.session) ctx.session = {};
+          ctx.session.lastMessageId = ctx.callbackQuery.message.message_id;
+        }
         return;
       } catch (error) {
         console.log("Не удалось отредактировать сообщение:", error);
@@ -635,33 +651,25 @@ ${badgesText}
     }
 
     // Отправляем сообщение (только если не смогли отредактировать)
-    const msg = await ctx.reply(profileText, {
-      parse_mode: "HTML",
-      reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "✏️ Редактировать профиль",
-              callback_data: "edit_profile_menu",
-            },
-            {
-              text: "🏆 Все достижения",
-              callback_data: "show_all_badges",
-            },
-          ],
-          [{ text: "⬅️ Назад в меню", callback_data: "back_to_main_menu" }],
-        ],
-      },
-    });
+    let msg;
+    if (userData.dog && userData.dog.photoId) {
+      // Если есть фото, отправляем с текстом профиля
+      msg = await ctx.replyWithPhoto(userData.dog.photoId, {
+        caption: profileText,
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+    } else {
+      // Если фото нет, отправляем только текст
+      msg = await ctx.reply(profileText, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+    }
 
     // Сохраняем ID сообщения в сессии
     if (!ctx.session) ctx.session = {};
     ctx.session.lastMessageId = msg.message_id;
-
-    // Если у собаки есть фото, отправляем его отдельным сообщением
-    if (userData.dog && userData.dog.photoId) {
-      await ctx.replyWithPhoto(userData.dog.photoId);
-    }
   } catch (error) {
     console.error("Ошибка при отображении профиля:", error);
     throw error;
@@ -5126,7 +5134,7 @@ bot.action("show_rating", async (ctx) => {
         if (userData.achievements.walkCount > 0) {
           participants.push({
             name: userData.name,
-            // ИСПРАВЛЕНИЕ: используем userRank вместо participantRank
+            username: userData.username, // Добавляем username в данные
             rank: userData.achievements.userRank,
             count: userData.achievements.walkCount,
           });
@@ -5135,8 +5143,7 @@ bot.action("show_rating", async (ctx) => {
         if (userData.achievements.organizedCount > 0) {
           organizers.push({
             name: userData.name,
-            // ИСПРАВЛЕНИЕ: используем organizerBadge вместо organizerRank
-            // Или можно использовать другое подходящее поле
+            username: userData.username, // Добавляем username в данные
             rank: userData.achievements.organizerBadge || "Организатор",
             count: userData.achievements.organizedCount,
           });
@@ -5158,7 +5165,9 @@ bot.action("show_rating", async (ctx) => {
     message += "<b>Топ участников прогулок:</b>\n";
     if (topParticipants.length > 0) {
       topParticipants.forEach((p, index) => {
-        message += `${index + 1}. ${p.name} - ${p.rank} (${p.count} прогулок)\n`;
+        // Добавляем username к имени, если он существует
+        const usernameDisplay = p.username ? ` (@${p.username})` : "";
+        message += `${index + 1}. ${p.name}${usernameDisplay} - ${p.rank} (${p.count} прогулок)\n`;
       });
     } else {
       message += "Пока нет участников с прогулками.\n";
@@ -5167,7 +5176,9 @@ bot.action("show_rating", async (ctx) => {
     message += "\n<b>Топ организаторов прогулок:</b>\n";
     if (topOrganizers.length > 0) {
       topOrganizers.forEach((o, index) => {
-        message += `${index + 1}. ${o.name} - ${o.rank} (${o.count} прогулок)\n`;
+        // Добавляем username к имени, если он существует
+        const usernameDisplay = o.username ? ` (@${o.username})` : "";
+        message += `${index + 1}. ${o.name}${usernameDisplay} - ${o.rank} (${o.count} прогулок)\n`;
       });
     } else {
       message += "Пока нет организаторов прогулок.\n";
