@@ -110,6 +110,40 @@ bot.use(async (ctx, next) => {
   }
 });
 
+// Middleware для автоматического ответа на callback_query
+bot.use(async (ctx, next) => {
+  // Если это callback_query, немедленно ответить
+  if (ctx.callbackQuery) {
+    try {
+      // Заводим таймер для ответа
+      const timeoutPromise = new Promise((resolve) => {
+        setTimeout(() => {
+          try {
+            ctx
+              .answerCbQuery()
+              .catch((e) =>
+                console.log("Ошибка при ответе на callback:", e.message)
+              );
+          } catch (e) {
+            console.log("Ошибка в таймере callback:", e.message);
+          }
+          resolve();
+        }, 10); // Отвечаем через 10 мс, чтобы точно успеть
+      });
+
+      // Параллельно продолжаем обработку
+      await Promise.all([next(), timeoutPromise]);
+    } catch (error) {
+      console.log("Ошибка в middleware для callback:", error.message);
+      // Продолжаем обработку даже при ошибке
+      await next();
+    }
+  } else {
+    // Если это не callback_query, просто продолжаем
+    await next();
+  }
+});
+
 // Константы для размеров и возраста собак
 const DOG_SIZES = {
   SMALL: { text: "Маленькая 🐾 (до 10 кг)", value: "small" },
@@ -648,12 +682,13 @@ ${badgesText}
 }
 // Функция для обновления сообщения вместо отправки нового
 // Улучшенная функция обновления сообщений для исправления проблемы с контекстом кнопок
+// Улучшенная версия существующей функции updateWizardMessage
 async function updateWizardMessage(ctx, text, keyboard = null) {
   try {
     // Определяем ID сообщения, которое нужно обновить
     let messageId;
 
-    // Если это callback (нажатие на кнопку), используем ID текущего сообщения
+    // Если это callback, используем ID текущего сообщения
     if (ctx.callbackQuery && ctx.callbackQuery.message) {
       messageId = ctx.callbackQuery.message.message_id;
     }
@@ -665,10 +700,15 @@ async function updateWizardMessage(ctx, text, keyboard = null) {
     // Если нашли ID сообщения, обновляем его
     if (messageId) {
       try {
-        await ctx.telegram.editMessageText(ctx.chat.id, messageId, null, text, {
-          parse_mode: "HTML",
-          reply_markup: keyboard,
-        });
+        await ctx.telegram
+          .editMessageText(ctx.chat.id, messageId, null, text, {
+            parse_mode: "HTML",
+            reply_markup: keyboard,
+          })
+          .catch((error) => {
+            console.log("Ошибка при обновлении сообщения:", error.message);
+            // Просто логируем, но не выбрасываем ошибку дальше
+          });
 
         // Сохраняем ID в сессии для будущих обновлений
         if (!ctx.session) ctx.session = {};
@@ -676,24 +716,30 @@ async function updateWizardMessage(ctx, text, keyboard = null) {
         return;
       } catch (error) {
         console.log("Ошибка при обновлении сообщения:", error.message);
-        // Если не удалось обновить, отправим новое
+        // Не выбрасываем ошибку, а просто продолжаем выполнение
+        // Ниже отправим новое сообщение
       }
     }
 
     // Если не удалось обновить, отправляем новое сообщение
-    const msg = await ctx.reply(text, {
-      parse_mode: "HTML",
-      reply_markup: keyboard,
-    });
+    try {
+      const msg = await ctx.reply(text, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
 
-    // Сохраняем ID нового сообщения
-    if (!ctx.session) ctx.session = {};
-    ctx.session.lastMessageId = msg.message_id;
+      // Сохраняем ID нового сообщения
+      if (!ctx.session) ctx.session = {};
+      ctx.session.lastMessageId = msg.message_id;
+    } catch (error) {
+      console.error("Ошибка при отправке нового сообщения:", error.message);
+      // Просто логируем ошибку, но не даем боту упасть
+    }
   } catch (error) {
-    console.error("Ошибка в функции updateWizardMessage:", error);
+    console.error("Ошибка в функции updateWizardMessage:", error.message);
+    // Не выбрасываем ошибку дальше, чтобы не крашить бота
   }
 }
-
 // Функция для получения текстового представления размера собаки
 function getDogSizeText(size) {
   const sizeObj = Object.values(DOG_SIZES).find((s) => s.value === size);
@@ -944,132 +990,157 @@ async function notifyNearbyUsers(walkId, organizer, walkData) {
 }
 
 async function remindAboutWalks() {
-  const now = new Date();
-  const today = moment(now).format("DD.MM.YYYY");
+  try {
+    // Используем moment для корректной работы с датами
+    const now = moment();
+    const today = now.format("DD.MM.YYYY");
 
-  // Получаем все прогулки
-  const walksSnapshot = await db.collection("walks").get();
-  console.log(`Проверка ${walksSnapshot.docs.length} прогулок на ${today}`);
+    // Получаем все прогулки
+    const walksSnapshot = await db.collection("walks").get();
+    console.log(`Проверка ${walksSnapshot.docs.length} прогулок на ${today}`);
 
-  for (const walkDoc of walksSnapshot.docs) {
-    const walk = walkDoc.data();
-    const walkId = walkDoc.id;
+    for (const walkDoc of walksSnapshot.docs) {
+      try {
+        const walk = walkDoc.data();
+        const walkId = walkDoc.id;
 
-    // Парсим время прогулки
-    const [hours, minutes] = walk.time.split(":").map(Number);
-    const walkTime = new Date();
+        // Парсим дату и время прогулки используя moment
+        const [day, month, year] = walk.date.split(".").map(Number);
+        const [hours, minutes] = walk.time.split(":").map(Number);
 
-    // Парсим дату прогулки
-    const [day, month, year] = walk.date.split(".").map(Number);
-    walkTime.setFullYear(year, month - 1, day); // Месяцы в JavaScript начинаются с 0
-    walkTime.setHours(hours, minutes, 0, 0);
+        // Создаем moment объект с датой и временем прогулки
+        const walkTime = moment()
+          .year(year)
+          .month(month - 1) // Месяцы в JavaScript начинаются с 0
+          .date(day)
+          .hour(hours)
+          .minute(minutes)
+          .second(0);
 
-    // Проверяем, что прогулка уже прошла и прошло более часа
-    const timeDiffMinutes = Math.round((now - walkTime) / (1000 * 60));
+        // Проверяем разницу во времени между текущим моментом и временем прогулки
+        const timeDiffMinutes = now.diff(walkTime, "minutes");
 
-    // Обрабатываем разовые прогулки
-    if (walk.type === "single" && timeDiffMinutes > 60) {
-      // Проверяем, не архивирована ли уже прогулка
-      if (!walk.status || walk.status !== "archived") {
-        // Архивируем прогулку
-        await db.collection("walks").doc(walkId).update({
-          status: "archived",
-          archivedAt: new Date(),
-        });
+        // Логируем для отладки
         console.log(
-          `Прогулка ${walkId} архивирована (прошла более часа назад)`
+          `Прогулка ${walkId}: дата=${walk.date}, время=${walk.time}, разница=${timeDiffMinutes} минут`
         );
 
-        // Записываем прогулку в достижения
-        await recordCompletedWalk(walkId);
-      }
-      continue;
-    }
+        // Обрабатываем разовые прогулки
+        if (walk.type === "single" && timeDiffMinutes > 60) {
+          // Проверяем, не архивирована ли уже прогулка
+          if (!walk.status || walk.status !== "archived") {
+            // Архивируем прогулку
+            await db.collection("walks").doc(walkId).update({
+              status: "archived",
+              archivedAt: new Date(),
+            });
+            console.log(
+              `Прогулка ${walkId} архивирована (прошла более часа назад)`
+            );
 
-    // Обрабатываем регулярные прогулки
-    if (
-      walk.type === "regular" &&
-      walk.date === today &&
-      timeDiffMinutes > 60
-    ) {
-      // Создаем или обновляем массив прошедших экземпляров регулярной прогулки
-      const lastOccurrences = walk.lastOccurrences || [];
-      const isTodayCompleted = lastOccurrences.some(
-        (occurrence) => occurrence.date === today
-      );
-
-      if (!isTodayCompleted) {
-        // Добавляем сегодняшнюю дату как завершенную
-        const updatedOccurrences = [
-          ...lastOccurrences,
-          {
-            date: today,
-            status: "completed",
-            completedAt: new Date(),
-          },
-        ];
-
-        // Ограничиваем размер истории (хранить последние 30 дней)
-        if (updatedOccurrences.length > 30) {
-          updatedOccurrences.shift();
+            // Записываем прогулку в достижения
+            await recordCompletedWalk(walkId);
+          }
+          continue;
         }
 
-        await db.collection("walks").doc(walkId).update({
-          lastOccurrences: updatedOccurrences,
-        });
+        // Обрабатываем регулярные прогулки
+        if (
+          walk.type === "regular" &&
+          walk.date === today &&
+          timeDiffMinutes > 60
+        ) {
+          // Создаем или обновляем массив прошедших экземпляров регулярной прогулки
+          const lastOccurrences = walk.lastOccurrences || [];
+          const isTodayCompleted = lastOccurrences.some(
+            (occurrence) => occurrence.date === today
+          );
 
-        console.log(
-          `Регулярная прогулка ${walkId} отмечена как завершенная на ${today}`
-        );
+          if (!isTodayCompleted) {
+            // Добавляем сегодняшнюю дату как завершенную
+            const updatedOccurrences = [
+              ...lastOccurrences,
+              {
+                date: today,
+                status: "completed",
+                completedAt: new Date(),
+              },
+            ];
 
-        // Записываем прогулку в достижения
-        await recordCompletedWalk(walkId);
-      }
-      continue;
-    }
+            // Ограничиваем размер истории (хранить последние 30 дней)
+            if (updatedOccurrences.length > 30) {
+              updatedOccurrences.shift();
+            }
 
-    // Напоминание о предстоящей прогулке (только для прогулок сегодня)
-    if (walk.date === today) {
-      // Проверяем, что до прогулки осталось примерно 15 минут
-      const timeToWalkMinutes = Math.round((walkTime - now) / (1000 * 60));
+            await db.collection("walks").doc(walkId).update({
+              lastOccurrences: updatedOccurrences,
+            });
 
-      if (timeToWalkMinutes > 14 && timeToWalkMinutes < 16) {
-        // Отправляем напоминания всем участникам и организатору
-        const reminderText = `
-🔔 Напоминание: у вас прогулка через 15 минут!
+            console.log(
+              `Регулярная прогулка ${walkId} отмечена как завершенная на ${today}`
+            );
+
+            // Записываем прогулку в достижения
+            await recordCompletedWalk(walkId);
+          }
+          continue;
+        }
+
+        // Напоминание о предстоящей прогулке (только для прогулок сегодня)
+        if (walk.date === today) {
+          // Проверяем, что до прогулки осталось примерно 15 минут
+          const timeToWalkMinutes = walkTime.diff(now, "minutes");
+
+          console.log(
+            `Прогулка ${walkId}: до начала осталось ${timeToWalkMinutes} минут`
+          );
+
+          if (timeToWalkMinutes > 14 && timeToWalkMinutes < 16) {
+            // Отправляем напоминания всем участникам и организатору
+            const reminderText = `
+🔔 <b>Напоминание: у вас прогулка через 15 минут!</b>
 🗓 ${walk.date}, ${walk.time}
 📍 ${walk.locationText || "По геолокации"}
 `;
 
-        // Уведомляем организатора
-        try {
-          await bot.telegram.sendMessage(walk.organizer.id, reminderText, {
-            reply_markup: getMainMenuKeyboard(),
-          });
-        } catch (error) {
-          console.error(
-            `Ошибка при отправке напоминания организатору ${walk.organizer.id}:`,
-            error
-          );
-        }
-
-        // Уведомляем всех участников
-        if (walk.participants && Array.isArray(walk.participants)) {
-          for (const participant of walk.participants) {
+            // Уведомляем организатора
             try {
-              await bot.telegram.sendMessage(participant.id, reminderText, {
-                reply_markup: getMainMenuKeyboard(),
+              await bot.telegram.sendMessage(walk.organizer.id, reminderText, {
+                parse_mode: "HTML",
+                reply_markup: getMainMenuKeyboard(), // Инлайновая клавиатура
               });
             } catch (error) {
               console.error(
-                `Ошибка при отправке напоминания участнику ${participant.id}:`,
+                `Ошибка при отправке напоминания организатору ${walk.organizer.id}:`,
                 error
               );
             }
+
+            // Уведомляем всех участников
+            if (walk.participants && Array.isArray(walk.participants)) {
+              for (const participant of walk.participants) {
+                try {
+                  await bot.telegram.sendMessage(participant.id, reminderText, {
+                    parse_mode: "HTML",
+                    reply_markup: getMainMenuKeyboard(), // Инлайновая клавиатура
+                  });
+                } catch (error) {
+                  console.error(
+                    `Ошибка при отправке напоминания участнику ${participant.id}:`,
+                    error
+                  );
+                }
+              }
+            }
           }
         }
+      } catch (walkError) {
+        console.error(`Ошибка при обработке прогулки:`, walkError);
+        // Продолжаем с другими прогулками в случае ошибки с конкретной прогулкой
       }
     }
+  } catch (error) {
+    console.error("Глобальная ошибка в функции remindAboutWalks:", error);
   }
 }
 
@@ -5211,24 +5282,33 @@ bot.action("back_to_city_selection", async (ctx) => {
 // Обработчик кнопки "Отменить" в конце создания прогулки
 bot.action("cancel_walk", async (ctx) => {
   try {
-    await ctx.answerCbQuery("Создание прогулки отменено");
+    await ctx
+      .answerCbQuery("Создание прогулки отменено")
+      .catch((err) =>
+        console.log("Ошибка при ответе на callback:", err.message)
+      );
 
-    // Пытаемся удалить инлайн кнопки
-    try {
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-    } catch (error) {
-      console.error("Ошибка при удалении клавиатуры:", error);
-    }
-
+    // Вариант 1: Показываем сообщение с главным меню
     await ctx.reply("❌ Создание прогулки отменено.", {
-      reply_markup: getMainMenuKeyboard(),
+      reply_markup: getMainMenuKeyboard(), // Используем инлайновые кнопки
     });
+
+    // Вариант 2: Удаляем сообщение с превью прогулки через 1.5 секунды
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      setTimeout(async () => {
+        try {
+          await ctx.deleteMessage(ctx.callbackQuery.message.message_id);
+        } catch (error) {
+          console.log("Не удалось удалить сообщение с превью:", error.message);
+        }
+      }, 1500);
+    }
 
     return ctx.scene.leave();
   } catch (error) {
     console.error("Ошибка при отмене создания прогулки:", error);
     await ctx.reply("Произошла ошибка. Возврат в главное меню.", {
-      reply_markup: getMainMenuKeyboard(),
+      reply_markup: getMainMenuKeyboard(), // Используем инлайновые кнопки
     });
     return ctx.scene.leave();
   }
@@ -6129,12 +6209,12 @@ bot.action(/join_walk_(.+)/, async (ctx) => {
         await bot.telegram.sendPhoto(walk.organizer.id, userData.dog.photoId, {
           caption: notificationText,
           parse_mode: "HTML",
-          reply_markup: getMainMenuKeyboard(),
+          reply_markup: getMainMenuKeyboard(), // Используем инлайновые кнопки главного меню
         });
       } else {
         await bot.telegram.sendMessage(walk.organizer.id, notificationText, {
           parse_mode: "HTML",
-          reply_markup: getMainMenuKeyboard(),
+          reply_markup: getMainMenuKeyboard(), // Используем инлайновые кнопки главного меню
         });
       }
     } catch (error) {
@@ -7360,6 +7440,25 @@ bot.command("start", async (ctx) => {
   }
 });
 
+// Глобальный перехватчик ошибок для сохранения работоспособности бота
+bot.catch((err, ctx) => {
+  console.error(`Ошибка в обработчике ${ctx.updateType}:`, err);
+
+  // Если это ошибка callback_query, пытаемся ответить пользователю
+  if (ctx.updateType === "callback_query") {
+    try {
+      // Не пытаемся снова ответить на callback_query, только отправляем сообщение
+      ctx
+        .reply("Произошла ошибка при обработке запроса. Попробуйте еще раз.")
+        .catch((e) => {
+          console.log("Не удалось отправить сообщение об ошибке:", e.message);
+        });
+    } catch (replyError) {
+      console.error("Ошибка при отправке сообщения об ошибке:", replyError);
+    }
+  }
+});
+
 bot
   .launch()
   .then(async () => {
@@ -7374,3 +7473,14 @@ bot
 // Обработка прерываний
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
+
+process.on("uncaughtException", (err) => {
+  console.error("Необработанная ошибка:", err);
+  // Не выходим из процесса, позволяем боту продолжить работу
+});
+
+// Глобальная обработка необработанных отклоненных промисов
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Необработанный отклоненный промис:", reason);
+  // Не выходим из процесса, позволяем боту продолжить работу
+});
