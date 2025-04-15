@@ -5110,49 +5110,62 @@ bot.action("show_all_badges", async (ctx) => {
   try {
     await ctx.answerCbQuery();
 
+    // Получаем данные пользователя
     const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
     if (!userDoc.exists) return;
 
     const userData = userDoc.data();
+
+    // Подготавливаем сообщение
+    let message;
     if (
       !userData.achievements ||
       !userData.achievements.badges ||
       userData.achievements.badges.length === 0
     ) {
-      await updateWizardMessage(
-        ctx,
-        "У вас пока нет заработанных достижений. Присоединяйтесь к прогулкам, чтобы получить их!",
-        {
-          inline_keyboard: [
-            [{ text: "⬅️ Назад в профиль", callback_data: "my_profile" }],
-          ],
-        }
-      );
-      return;
+      message =
+        "У вас пока нет заработанных достижений. Присоединяйтесь к прогулкам, чтобы получить их!";
+    } else {
+      // Сортируем бейджи по дате получения (новые вверху)
+      const sortedBadges = [...userData.achievements.badges].sort((a, b) => {
+        return new Date(b.earnedAt) - new Date(a.earnedAt);
+      });
+
+      // Формируем сообщение с достижениями
+      message = "🏆 <b>Ваши достижения</b> 🏆\n\n";
+      sortedBadges.forEach((badge, index) => {
+        const date = new Date(badge.earnedAt).toLocaleDateString();
+        message += `${index + 1}. <b>${badge.name}</b> (${date})\n   ${badge.description}\n\n`;
+      });
     }
 
-    // Сортируем бейджи по дате получения (новые вверху)
-    const sortedBadges = [...userData.achievements.badges].sort((a, b) => {
-      return new Date(b.earnedAt) - new Date(a.earnedAt);
-    });
+    // Простое решение - удаляем текущее сообщение и отправляем новое
+    try {
+      if (ctx.callbackQuery && ctx.callbackQuery.message) {
+        await ctx.deleteMessage(ctx.callbackQuery.message.message_id);
+      }
+    } catch (deleteError) {
+      console.log("Не удалось удалить сообщение:", deleteError);
+    }
 
-    // Формируем сообщение с достижениями
-    let message = "🏆 <b>Ваши достижения</b> 🏆\n\n";
-
-    sortedBadges.forEach((badge, index) => {
-      const date = new Date(badge.earnedAt).toLocaleDateString();
-      message += `${index + 1}. <b>${badge.name}</b> (${date})\n   ${badge.description}\n\n`;
-    });
-
-    await updateWizardMessage(ctx, message, {
+    // Отправляем новое сообщение
+    await ctx.reply(message, {
       parse_mode: "HTML",
-      inline_keyboard: [
-        [{ text: "⬅️ Назад в профиль", callback_data: "my_profile" }],
-      ],
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад в профиль", callback_data: "my_profile" }],
+        ],
+      },
     });
   } catch (error) {
     console.error("Ошибка при показе достижений:", error);
-    await ctx.reply("Произошла ошибка при загрузке достижений.");
+    await ctx.reply("Произошла ошибка при загрузке достижений.", {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "⬅️ Назад в профиль", callback_data: "my_profile" }],
+        ],
+      },
+    });
   }
 });
 
@@ -5366,6 +5379,10 @@ bot.action("my_profile", async (ctx) => {
   try {
     await ctx.answerCbQuery();
 
+    // Устанавливаем флаг, что мы в профиле
+    if (!ctx.session) ctx.session = {};
+    ctx.session.inProfileView = true;
+
     // Получаем ID сообщения из callback-запроса
     const messageId =
       ctx.callbackQuery && ctx.callbackQuery.message
@@ -5414,7 +5431,7 @@ bot.action("my_profile", async (ctx) => {
         ? new Date(achievements.specialStatus.expiresAt)
         : null;
       if (expiryDate && expiryDate > new Date()) {
-        specialStatusText = `\n✨ <b>Особый статус:</b> ${achievements.specialStatus.title} (до ${moment(expiryDate).format("DD.MM")})`;
+        specialStatusText = `\n🌟 <b>Особый статус:</b> ${achievements.specialStatus.title}`;
       } else {
         // Если статус истек, удаляем его
         db.collection("users").doc(String(ctx.from.id)).update({
@@ -5424,6 +5441,7 @@ bot.action("my_profile", async (ctx) => {
       }
     }
 
+    // Формируем текст последних достижений
     let badgesText = "";
     if (achievements.badges && achievements.badges.length > 0) {
       const latestBadges = achievements.badges.slice(-3); // Последние 3 значка
@@ -5437,20 +5455,17 @@ bot.action("my_profile", async (ctx) => {
       ? ` ${achievements.organizerBadge}`
       : "";
 
-    const nextRankInfo = getNextRankInfo(achievements.walkCount);
-    const progressText = `📈 <b>Прогресс:</b> ${achievements.walkCount}/${nextRankInfo.threshold} прогулок до звания "${nextRankInfo.rank}"`;
-
     const profileText = `
-      🐕 <b>КАРТОЧКА СОБАКОВОДА</b> 🐕
-      
-      👤 <b>${userData.name}</b>${orgBadge} ${userData.username ? "@" + userData.username : ""}
-      📊 <b>Звание:</b> ${achievements.userRank}
-      🦴 <b>Прогулок:</b> ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
-      ${progressText}
-      📍 <b>Город:</b> ${userData.city}
-      🐕 <b>Собака:</b> ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
-      ${badgesText}
-          `;
+🐕 <b>КАРТОЧКА СОБАКОВОДА</b> 🐕
+
+👤 <b>${userData.name}</b>${orgBadge} ${userData.username ? "@" + userData.username : ""}
+📊 <b>Звание:</b> ${achievements.userRank}
+🦴 <b>Прогулок:</b> ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
+
+📍 <b>Город:</b> ${userData.city}
+🐕 <b>Собака:</b> ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+${badgesText}
+    `;
 
     const keyboard = {
       inline_keyboard: [
@@ -5487,13 +5502,13 @@ bot.action("my_profile", async (ctx) => {
       if (!ctx.session) ctx.session = {};
       ctx.session.lastMessageId = photoMsg.message_id;
     } else {
-      // Если редактирование не удалось, отправляем новое сообщение
+      // Если нет фото, просто отправляем текст
       const msg = await ctx.reply(profileText, {
         parse_mode: "HTML",
         reply_markup: keyboard,
       });
 
-      // Сохраняем ID нового сообщения
+      // Сохраняем ID сообщения
       ctx.session.lastMessageId = msg.message_id;
     }
   } catch (error) {
@@ -5504,6 +5519,37 @@ bot.action("my_profile", async (ctx) => {
   }
 });
 
+bot.action("back_to_main_menu", async (ctx) => {
+  await ctx.answerCbQuery();
+
+  // Проверяем, находимся ли мы в профиле
+  if (ctx.session && ctx.session.inProfileView) {
+    // Сбрасываем флаг
+    ctx.session.inProfileView = false;
+
+    // Удаляем текущее сообщение с профилем
+    try {
+      if (ctx.callbackQuery && ctx.callbackQuery.message) {
+        await ctx.deleteMessage(ctx.callbackQuery.message.message_id);
+      }
+    } catch (error) {
+      console.log("Не удалось удалить сообщение профиля:", error);
+    }
+
+    // Отправляем новое сообщение с главным меню
+    const menuText =
+      "<b>Главное меню DogMeet</b> 🎮\n\n" + "Чем займемся сегодня?";
+    await ctx.reply(menuText, {
+      parse_mode: "HTML",
+      reply_markup: getMainMenuKeyboard(),
+    });
+  } else {
+    // Обычное поведение для других случаев
+    const menuText =
+      "<b>Главное меню DogMeet</b> 🎮\n\n" + "Чем займемся сегодня?";
+    await updateWizardMessage(ctx, menuText, getMainMenuKeyboard());
+  }
+});
 bot.action("back_to_main_menu", async (ctx) => {
   await ctx.answerCbQuery();
   const menuText =
