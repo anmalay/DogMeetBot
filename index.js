@@ -683,6 +683,7 @@ ${badgesText}
 // Функция для обновления сообщения вместо отправки нового
 // Улучшенная функция обновления сообщений для исправления проблемы с контекстом кнопок
 // Улучшенная версия существующей функции updateWizardMessage
+// Улучшенная версия существующей функции updateWizardMessage
 async function updateWizardMessage(ctx, text, keyboard = null) {
   try {
     // Определяем ID сообщения, которое нужно обновить
@@ -691,6 +692,24 @@ async function updateWizardMessage(ctx, text, keyboard = null) {
     // Если это callback, используем ID текущего сообщения
     if (ctx.callbackQuery && ctx.callbackQuery.message) {
       messageId = ctx.callbackQuery.message.message_id;
+
+      // Проверяем, содержит ли сообщение фото (такие сообщения нельзя просто отредактировать)
+      const hasPhoto =
+        ctx.callbackQuery.message.photo &&
+        ctx.callbackQuery.message.photo.length > 0;
+
+      if (hasPhoto) {
+        // Если это сообщение с фото, отправляем новое сообщение вместо редактирования
+        const msg = await ctx.reply(text, {
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+
+        // Сохраняем ID нового сообщения
+        if (!ctx.session) ctx.session = {};
+        ctx.session.lastMessageId = msg.message_id;
+        return;
+      }
     }
     // Иначе берем ID из сессии (если есть)
     else if (ctx.session && ctx.session.lastMessageId) {
@@ -707,7 +726,24 @@ async function updateWizardMessage(ctx, text, keyboard = null) {
           })
           .catch((error) => {
             console.log("Ошибка при обновлении сообщения:", error.message);
-            // Просто логируем, но не выбрасываем ошибку дальше
+            // Если ошибка связана с невозможностью редактирования - отправляем новое сообщение
+            if (
+              error.message.includes(
+                "there is no text in the message to edit"
+              ) ||
+              error.message.includes("message to edit not found") ||
+              error.message.includes("message can't be edited")
+            ) {
+              ctx
+                .reply(text, {
+                  parse_mode: "HTML",
+                  reply_markup: keyboard,
+                })
+                .then((msg) => {
+                  if (!ctx.session) ctx.session = {};
+                  ctx.session.lastMessageId = msg.message_id;
+                });
+            }
           });
 
         // Сохраняем ID в сессии для будущих обновлений
@@ -4929,6 +4965,15 @@ bot.action("ranks_info", async (ctx) => {
   try {
     await ctx.answerCbQuery();
 
+    // Удаляем текущее сообщение (с фото или без)
+    try {
+      if (ctx.callbackQuery && ctx.callbackQuery.message) {
+        await ctx.deleteMessage(ctx.callbackQuery.message.message_id);
+      }
+    } catch (error) {
+      console.log("Не удалось удалить сообщение:", error);
+    }
+
     const ranksInfoText = `
     🏆 <b>Система званий и достижений</b> 🏆
     
@@ -4972,31 +5017,15 @@ bot.action("ranks_info", async (ctx) => {
     Будьте ответственны и не пропускайте запланированные прогулки — так вы быстрее заработаете новые звания и уважение в сообществе!
     `;
 
-    // Вместо updateWizardMessage используем прямое редактирование сообщения
-    try {
-      await ctx.editMessageText(ranksInfoText, {
-        parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "👤 Вернуться в профиль", callback_data: "my_profile" }],
-            [{ text: "🏠 В главное меню", callback_data: "back_to_main_menu" }],
-          ],
-        },
-      });
-    } catch (error) {
-      console.error("Ошибка при обновлении сообщения:", error);
-
-      // Если не удалось обновить, отправляем новое сообщение
-      await ctx.reply(ranksInfoText, {
-        parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "👤 Вернуться в профиль", callback_data: "my_profile" }],
-            [{ text: "🏠 В главное меню", callback_data: "back_to_main_menu" }],
-          ],
-        },
-      });
-    }
+    await ctx.reply(ranksInfoText, {
+      parse_mode: "HTML",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "👤 Вернуться в профиль", callback_data: "my_profile" }],
+          [{ text: "🏠 В главное меню", callback_data: "back_to_main_menu" }],
+        ],
+      },
+    });
   } catch (error) {
     console.error("Ошибка при показе информации о званиях:", error);
     await ctx.reply("Произошла ошибка. Попробуйте снова.", {
@@ -5560,9 +5589,17 @@ bot.action("back_to_main_menu", async (ctx) => {
 bot.action("edit_profile_menu", async (ctx) => {
   await ctx.answerCbQuery();
 
-  // Простой текст без маркеров и цифр
-  const menuText = "Что вы хотите изменить?";
+  // Удаляем текущее сообщение (с фото или без)
+  try {
+    if (ctx.callbackQuery && ctx.callbackQuery.message) {
+      await ctx.deleteMessage(ctx.callbackQuery.message.message_id);
+    }
+  } catch (error) {
+    console.log("Не удалось удалить сообщение:", error);
+  }
 
+  // Отправляем новое сообщение
+  const menuText = "Что вы хотите изменить?";
   const keyboard = {
     inline_keyboard: [
       [
@@ -5582,18 +5619,7 @@ bot.action("edit_profile_menu", async (ctx) => {
     ],
   };
 
-  // Пытаемся обновить текущее сообщение
-  try {
-    await ctx.editMessageText(menuText, {
-      reply_markup: keyboard,
-    });
-  } catch (error) {
-    // Если возникла ошибка, отправляем новое сообщение
-    console.log("Ошибка при обновлении сообщения:", error.message);
-    await ctx.reply(menuText, {
-      reply_markup: keyboard,
-    });
-  }
+  await ctx.reply(menuText, { reply_markup: keyboard });
 });
 // Обработчик для поиска в своем городе
 bot.action("search_in_my_city", async (ctx) => {
