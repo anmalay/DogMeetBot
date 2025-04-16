@@ -3432,19 +3432,23 @@ const editCityScene = new Scenes.WizardScene(
         `• Получать уведомления о прогулках поблизости\n` +
         `• Использовать фильтр "Прогулки рядом"\n` +
         `• Находить собачьих друзей в вашем районе`,
-      { parse_mode: "HTML" },
-      Markup.inlineKeyboard([
-        ...POPULAR_CITIES.map((city) => [
-          { text: city, callback_data: `city_${city}` },
-        ]),
-        [
-          {
-            text: "📍 Моё текущее местоположение",
-            callback_data: "current_location",
-          },
-        ],
-        [{ text: "↩️ Отмена", callback_data: "cancel_edit" }],
-      ])
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            ...POPULAR_CITIES.map((city) => [
+              { text: city, callback_data: `city_${city}` },
+            ]),
+            [
+              {
+                text: "📍 Моё текущее местоположение",
+                callback_data: "current_location",
+              },
+            ],
+            [{ text: "↩️ Отмена", callback_data: "cancel_edit" }],
+          ],
+        },
+      }
     );
     return ctx.wizard.next();
   },
