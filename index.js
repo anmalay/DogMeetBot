@@ -6057,8 +6057,9 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
     }
 
     const walk = walkDoc.data ? walkDoc.data() : walkDoc;
-    const cityInfo = walk.organizerCity ? `🏙️ ${walk.organizerCity}` : "";
+    const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
 
+    const userData = userDoc.data();
     // Формируем информацию о местоположении
     let locationInfo = "Не указано";
     if (walk.locationText) {
@@ -6072,6 +6073,7 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
       "✨ <b>ДЕТАЛИ ПРОГУЛКИ</b> ✨\n\n" +
       `
 🗓 Прогулка: ${walk.date}, ${walk.time} 
+🏙️Город:  ${userData.city} 
 📍 Место: ${locationInfo}  
 🔄 Тип: ${walk.type === "single" ? "Разовая" : "Регулярная"}  
 👤 Организатор: ${walk.organizer.name} ${walk.organizer.username ? "@" + walk.organizer.username : ""}  
