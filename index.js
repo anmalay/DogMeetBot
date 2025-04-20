@@ -563,6 +563,7 @@ function formatDistance(distance) {
 async function showProfile(ctx) {
   try {
     const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
+    const userData = userDoc.data();
 
     if (!userDoc.exists) {
       return await ctx.reply(
@@ -577,7 +578,6 @@ async function showProfile(ctx) {
       );
     }
 
-    const userData = userDoc.data();
     const achievements = userData.achievements || {
       walkCount: 0,
       organizedCount: 0,
@@ -624,7 +624,6 @@ async function showProfile(ctx) {
 👤 <b>${userData.name}</b>${orgBadge}
 📊 <b>Звание:</b> ${achievements.userRank}
 🦴 Прогулок: ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
-
 📍 Город: ${userData.city}
 🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
 ${badgesText}
@@ -784,7 +783,7 @@ function getDogSizeText(size) {
 
 // Добавить эту функцию для форматирования данных о прогулке
 function formatWalkInfo(walk, isOwn = false) {
-  // Добавляем пометку для собственных прогулок - создает чувство владения
+  // Добавляем пометку для собственных прогулок
   const ownLabel = isOwn ? "🌟 <b>ВАША ПРОГУЛКА</b>\n" : "";
 
   // Форматируем информацию о дистанции
@@ -794,13 +793,16 @@ function formatWalkInfo(walk, isOwn = false) {
       : `${walk.distance.toFixed(1)} км`
     : "";
 
-  // Добавляем информацию о дистанции с элементом срочности
+  // Добавляем информацию о дистанции
   const locationInfo = walk.locationText || "По геолокации";
   const locationWithDistance = distanceText
     ? `${locationInfo} (${distanceText} от вас 📌)`
     : locationInfo;
 
-  // Добавляем бейдж организатора, если он есть - статусный элемент
+  // Добавляем город организатора (новая строка)
+  const cityInfo = walk.organizerCity ? `🏙️ ${walk.organizerCity}` : "";
+
+  // Добавляем бейдж организатора, если он есть
   const organizerBadge =
     walk.organizer.achievements && walk.organizer.achievements.organizerBadge
       ? ` ${walk.organizer.achievements.organizerBadge}`
@@ -821,9 +823,10 @@ function formatWalkInfo(walk, isOwn = false) {
       ? `🐕 Присоединились: ${walk.participants.length + 1} собаководов!`
       : `🐕 Станьте первым участником!`;
 
-  // Собираем текст для предпросмотра прогулки
+  // Собираем текст для предпросмотра прогулки (добавляем cityInfo)
   return `${ownLabel}${timeInfo}, ${walk.time}
 📍 ${locationWithDistance}
+${cityInfo}
 ${participantsInfo}
 👤 ${walk.dog.name} (${walk.organizer.name}${organizerBadge}) ${getDogAgeText(walk.dog.age)}${userRankDisplay}
 ${walk.organizer.username ? "@" + walk.organizer.username : ""}`.trim();
@@ -1044,25 +1047,23 @@ async function remindAboutWalks() {
         const [day, month, year] = walk.date.split(".").map(Number);
         const [hours, minutes] = walk.time.split(":").map(Number);
 
-        // Создаем moment объект с датой и временем прогулки
-        const walkTime = moment()
-          .year(year)
-          .month(month - 1) // Месяцы в JavaScript начинаются с 0
-          .date(day)
-          .hour(hours)
-          .minute(minutes)
-          .second(0);
+        // Создаем moment объект с датой и временем прогулки - явно указываем формат
+        const walkTime = moment(
+          `${year}-${month}-${day} ${hours}:${minutes}:00`,
+          "YYYY-M-D H:m:s"
+        );
 
-        // Проверяем разницу во времени между текущим моментом и временем прогулки
-        const timeDiffMinutes = now.diff(walkTime, "minutes");
+        // Проверяем разницу во времени
+        // Теперь используем walkTime.diff(now) - сколько минут осталось до прогулки
+        const timeToWalkMinutes = walkTime.diff(now, "minutes");
 
         // Логируем для отладки
         console.log(
-          `Прогулка ${walkId}: дата=${walk.date}, время=${walk.time}, разница=${timeDiffMinutes} минут`
+          `Прогулка ${walkId}: дата=${walk.date}, время=${walk.time}, осталось=${timeToWalkMinutes} минут`
         );
 
         // Обрабатываем разовые прогулки
-        if (walk.type === "single" && timeDiffMinutes > 60) {
+        if (walk.type === "single" && timeToWalkMinutes < -60) {
           // Проверяем, не архивирована ли уже прогулка
           if (!walk.status || walk.status !== "archived") {
             // Архивируем прогулку
@@ -1084,7 +1085,7 @@ async function remindAboutWalks() {
         if (
           walk.type === "regular" &&
           walk.date === today &&
-          timeDiffMinutes > 60
+          timeToWalkMinutes < -60
         ) {
           // Создаем или обновляем массив прошедших экземпляров регулярной прогулки
           const lastOccurrences = walk.lastOccurrences || [];
@@ -1125,13 +1126,11 @@ async function remindAboutWalks() {
         // Напоминание о предстоящей прогулке (только для прогулок сегодня)
         if (walk.date === today) {
           // Проверяем, что до прогулки осталось примерно 15 минут
-          const timeToWalkMinutes = walkTime.diff(now, "minutes");
-
           console.log(
             `Прогулка ${walkId}: до начала осталось ${timeToWalkMinutes} минут`
           );
 
-          if (timeToWalkMinutes > 14 && timeToWalkMinutes < 16) {
+          if (timeToWalkMinutes >= 14 && timeToWalkMinutes <= 16) {
             // Отправляем напоминания всем участникам и организатору
             const reminderText = `
 🔔 <b>Напоминание: у вас прогулка через 15 минут!</b>
@@ -1143,7 +1142,7 @@ async function remindAboutWalks() {
             try {
               await bot.telegram.sendMessage(walk.organizer.id, reminderText, {
                 parse_mode: "HTML",
-                reply_markup: getMainMenuKeyboard(), // Инлайновая клавиатура
+                reply_markup: getMainMenuKeyboard(),
               });
             } catch (error) {
               console.error(
@@ -1158,7 +1157,7 @@ async function remindAboutWalks() {
                 try {
                   await bot.telegram.sendMessage(participant.id, reminderText, {
                     parse_mode: "HTML",
-                    reply_markup: getMainMenuKeyboard(), // Инлайновая клавиатура
+                    reply_markup: getMainMenuKeyboard(),
                   });
                 } catch (error) {
                   console.error(
@@ -1226,6 +1225,32 @@ async function showWalksWithPagination(
     });
   }
 
+  // Получаем ID организаторов
+  const organizerIds = [];
+  currentPageWalks.forEach((walkDoc) => {
+    const walk = walkDoc.data ? walkDoc.data() : walkDoc;
+    if (walk.organizer && walk.organizer.id) {
+      organizerIds.push(String(walk.organizer.id));
+    }
+  });
+
+  // Получаем данные организаторов
+  const organizerCities = {};
+  for (const organizerId of organizerIds) {
+    try {
+      const organizerDoc = await db.collection("users").doc(organizerId).get();
+      if (organizerDoc.exists) {
+        const organizerData = organizerDoc.data();
+        organizerCities[organizerId] = organizerData.city || "Не указан";
+      }
+    } catch (error) {
+      console.error(
+        `Ошибка при получении данных организатора ${organizerId}:`,
+        error
+      );
+    }
+  }
+
   // Сначала построим текст для списка прогулок
   let messageText = `Найдено ${walks.length} прогулок:\n\n`;
 
@@ -1233,6 +1258,15 @@ async function showWalksWithPagination(
   currentPageWalks.forEach((walkDoc, index) => {
     const walk = walkDoc.data ? walkDoc.data() : walkDoc;
     const isOwn = walk.organizer && walk.organizer.id == ctx.from.id;
+
+    // Добавляем город организатора в объект прогулки
+    if (walk.organizer && walk.organizer.id) {
+      walk.organizerCity =
+        organizerCities[String(walk.organizer.id)] || "Не указан";
+    } else {
+      walk.organizerCity = "Не указан";
+    }
+
     messageText += formatWalkInfo(walk, isOwn);
 
     // Добавляем разделитель между прогулками
@@ -5494,7 +5528,6 @@ bot.action("my_profile", async (ctx) => {
 👤 <b>${userData.name}</b>${orgBadge} ${userData.username ? "@" + userData.username : ""}
 📊 <b>Звание:</b> ${achievements.userRank}
 🦴 <b>Прогулок:</b> ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
-
 📍 <b>Город:</b> ${userData.city}
 🐕 <b>Собака:</b> ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
 ${badgesText}
@@ -6023,7 +6056,8 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
       );
     }
 
-    const walk = walkDoc.data();
+    const walk = walkDoc.data ? walkDoc.data() : walkDoc;
+    const cityInfo = walk.organizerCity ? `🏙️ ${walk.organizerCity}` : "";
 
     // Формируем информацию о местоположении
     let locationInfo = "Не указано";
@@ -6037,7 +6071,7 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
     let walkDetails =
       "✨ <b>ДЕТАЛИ ПРОГУЛКИ</b> ✨\n\n" +
       `
-🗓 Прогулка: ${walk.date}, ${walk.time}  
+🗓 Прогулка: ${walk.date}, ${walk.time} 
 📍 Место: ${locationInfo}  
 🔄 Тип: ${walk.type === "single" ? "Разовая" : "Регулярная"}  
 👤 Организатор: ${walk.organizer.name} ${walk.organizer.username ? "@" + walk.organizer.username : ""}  
@@ -7292,7 +7326,6 @@ editProfileMenuScene.action("my_profile", async (ctx) => {
    Участник: ${achievements.userRank}
    Организатор: ${achievements.organizerBadge}
 🦴 Прогулок: ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
-
 📍 Город: ${userData.city}
 🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
 ${badgesText}
