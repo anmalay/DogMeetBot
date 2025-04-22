@@ -209,7 +209,7 @@ function getOrganizerBadge(organizedCount) {
   return "";
 }
 
-function getNextRankInfo(currentWalkCount) {
+function getNextRankInfo(currentPoints) {
   const ranks = [
     { threshold: 1, rank: "Новичок в стае" },
     { threshold: 5, rank: "Верный друг" },
@@ -223,12 +223,25 @@ function getNextRankInfo(currentWalkCount) {
   ];
 
   for (const rankInfo of ranks) {
-    if (currentWalkCount < rankInfo.threshold) {
+    if (currentPoints < rankInfo.threshold) {
       return rankInfo;
     }
   }
 
   return { threshold: "∞", rank: "Легенда DogMeet+" };
+}
+
+function getUserRank(points) {
+  if (points >= 200) return "Легенда DogMeet";
+  if (points >= 120) return "АЛЬФА самец";
+  if (points >= 80) return "Мастер прогулок";
+  if (points >= 50) return "Бродяга со стажем";
+  if (points >= 35) return "Опытный следопыт";
+  if (points >= 20) return "Верный спутник";
+  if (points >= 10) return "Исследователь парков";
+  if (points >= 5) return "Верный друг";
+  if (points >= 1) return "Новичок в стае";
+  return "Хвостик";
 }
 
 function isDateToday(dateString) {
@@ -250,6 +263,7 @@ async function updateUserRanks(userId) {
       userData.achievements = {
         walkCount: 0,
         organizedCount: 0,
+        points: 0,
         userRank: "Хвостик",
         organizerBadge: "",
         badges: [],
@@ -265,8 +279,9 @@ async function updateUserRanks(userId) {
     const currentUserRank = userData.achievements.userRank;
     const currentOrganizerBadge = userData.achievements.organizerBadge || "";
 
-    // Определяем новые звания
-    const newUserRank = getUserRank(userData.achievements.walkCount);
+    // Определяем новые звания на основе очков
+    const points = userData.achievements.points || 0;
+    const newUserRank = getUserRank(points);
     const newOrganizerBadge = getOrganizerBadge(
       userData.achievements.organizedCount
     );
@@ -581,6 +596,7 @@ async function showProfile(ctx) {
     const achievements = userData.achievements || {
       walkCount: 0,
       organizedCount: 0,
+      points: 0,
       userRank: "Хвостик",
       organizerBadge: "",
       badges: [],
@@ -593,7 +609,7 @@ async function showProfile(ctx) {
         ? new Date(achievements.specialStatus.expiresAt)
         : null;
       if (expiryDate && expiryDate > new Date()) {
-        specialStatusText = `\n🌟 Особый статус: ${achievements.specialStatus.title}`;
+        specialStatusText = `\n🌟 <b>Особый статус:</b> ${achievements.specialStatus.title}`;
       } else {
         // Если статус истек, удаляем его
         db.collection("users").doc(String(ctx.from.id)).update({
@@ -607,10 +623,24 @@ async function showProfile(ctx) {
     let badgesText = "";
     if (achievements.badges && achievements.badges.length > 0) {
       const latestBadges = achievements.badges.slice(-3); // Последние 3 значка
-      badgesText = "\n🏅 Последние достижения: \n";
+      badgesText = "\n🏅 <b>Последние достижения:</b>\n";
       latestBadges.forEach((badge) => {
-        badgesText += `• ${badge.name} - ${badge.description}\n`;
+        badgesText += `• <i>${badge.name}</i> - ${badge.description}\n`;
       });
+    }
+
+    // Определяем прогресс до следующего звания
+    const currentPoints = achievements.points || 0;
+    const nextRank = getNextRankInfo(currentPoints);
+    let progressText = "";
+
+    if (nextRank.threshold !== "∞") {
+      const pointsNeeded = nextRank.threshold - currentPoints;
+      const progressPercentage = (
+        (currentPoints / nextRank.threshold) *
+        100
+      ).toFixed(0);
+      progressText = `\n📊 <b>До "${nextRank.rank}":</b> ${pointsNeeded.toFixed(1)} очков (${progressPercentage}%)`;
     }
 
     // Формируем строку с отметкой организатора
@@ -622,10 +652,10 @@ async function showProfile(ctx) {
 🐕 <b>КАРТОЧКА СОБАКОВОДА</b> 🐕
 
 👤 <b>${userData.name}</b>${orgBadge}
-📊 <b>Звание:</b> ${achievements.userRank}
-🦴 Прогулок: ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
-📍 Город: ${userData.city}
-🐕 Собака: ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
+📊 <b>Звание:</b> ${achievements.userRank}${progressText}
+🦴 <b>Прогулок:</b> ${achievements.walkCount} (организовано: ${achievements.organizedCount})${specialStatusText}
+📍 <b>Город:</b> ${userData.city}
+🐕 <b>Собака:</b> ${userData.dog.name}, ${userData.dog.breed}, ${getDogSizeText(userData.dog.size)}, ${getDogAgeText(userData.dog.age)}
 ${badgesText}
     `;
 
@@ -814,8 +844,16 @@ function formatWalkInfo(walk, isOwn = false) {
       ? `\n🏆 <i>${walk.organizer.achievements.userRank}</i>`
       : "";
 
-  // Добавляем элемент срочности/актуальности
-  const timeInfo = isDateToday(walk.date) ? "🔥 СЕГОДНЯ!" : `🗓 ${walk.date}`;
+  // Форматируем дату в зависимости от типа прогулки
+  let timeInfo;
+  if (walk.type === "regular") {
+    timeInfo = "🔄 КАЖДЫЙ ДЕНЬ!";
+  } else {
+    timeInfo = isDateToday(walk.date) ? "🔥 СЕГОДНЯ!" : `🗓 ${walk.date}`;
+  }
+
+  // Добавляем время к любому типу прогулки
+  timeInfo += `, ${walk.time}`;
 
   // Добавляем элемент социального доказательства
   const participantsInfo =
@@ -823,8 +861,8 @@ function formatWalkInfo(walk, isOwn = false) {
       ? `🐕 Присоединились: ${walk.participants.length + 1} собаководов!`
       : `🐕 Станьте первым участником!`;
 
-  // Собираем текст для предпросмотра прогулки (добавляем cityInfo)
-  return `${ownLabel}${timeInfo}, ${walk.time}
+  // Собираем текст для предпросмотра прогулки
+  return `${ownLabel}${timeInfo}
 📍 ${locationWithDistance}
 ${cityInfo}
 ${participantsInfo}
@@ -1208,15 +1246,21 @@ async function showWalksWithPagination(
   page = 0,
   returnCommand = "back_to_main_menu"
 ) {
+  // Фильтруем архивированные прогулки
+  const activeWalks = walks.filter((walkDoc) => {
+    const walk = walkDoc.data ? walkDoc.data() : walkDoc;
+    return walk.status !== "archived";
+  });
+
   // Настройки пагинации
   const walksPerPage = 3; // Прогулок на странице
-  const totalPages = Math.ceil(walks.length / walksPerPage);
-  const currentPageWalks = walks.slice(
+  const totalPages = Math.ceil(activeWalks.length / walksPerPage);
+  const currentPageWalks = activeWalks.slice(
     page * walksPerPage,
     (page + 1) * walksPerPage
   );
 
-  if (walks.length === 0) {
+  if (activeWalks.length === 0) {
     return await updateWizardMessage(ctx, "Прогулок не найдено.", {
       inline_keyboard: [
         [{ text: "🐕 Создать прогулку", callback_data: "create_walk" }],
@@ -1252,7 +1296,7 @@ async function showWalksWithPagination(
   }
 
   // Сначала построим текст для списка прогулок
-  let messageText = `Найдено ${walks.length} прогулок:\n\n`;
+  let messageText = `Найдено ${activeWalks.length} прогулок:\n\n`;
 
   // Добавляем каждую прогулку в сообщение
   currentPageWalks.forEach((walkDoc, index) => {
@@ -1319,7 +1363,7 @@ async function showWalksWithPagination(
 
   // Сохраняем данные в сессии для пагинации
   if (!ctx.session) ctx.session = {};
-  ctx.session.lastWalks = walks;
+  ctx.session.lastWalks = activeWalks;
   ctx.session.lastReturnCommand = returnCommand;
 }
 
@@ -1330,48 +1374,99 @@ async function recordCompletedWalk(walkId) {
 
     const walk = walkDoc.data();
 
-    // Обновляем счетчик организованных прогулок для организатора
-    await db
-      .collection("users")
-      .doc(String(walk.organizer.id))
-      .update({
-        "achievements.organizedCount": admin.firestore.FieldValue.increment(1),
-      });
+    // Проверяем наличие участников
+    const hasParticipants = walk.participants && walk.participants.length > 0;
 
-    // Обновляем звания организатора
-    await updateUserRanks(walk.organizer.id);
-
-    // Обновляем счетчик прогулок для организатора
+    // Получаем текущие данные организатора
     const organizerDoc = await db
       .collection("users")
       .doc(String(walk.organizer.id))
       .get();
-    const newOrganizerWalkCount =
-      (organizerDoc.data().achievements.walkCount || 0) + 1;
 
+    if (!organizerDoc.exists) {
+      console.log(`Профиль организатора ${walk.organizer.id} не найден`);
+      return false;
+    }
+
+    const organizerData = organizerDoc.data();
+
+    // Получаем текущие значения
+    const currentWalkCount = organizerData.achievements?.walkCount || 0;
+    const currentOrganizedCount =
+      organizerData.achievements?.organizedCount || 0;
+    const currentPoints = organizerData.achievements?.points || 0;
+
+    // Вычисляем новые значения
+    // КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Увеличиваем walkCount всегда на 1, независимо от наличия участников
+    const newWalkCount = currentWalkCount + 1;
+    const newOrganizedCount = currentOrganizedCount + 1;
+
+    // Очки зависят от наличия участников
+    let newPoints;
+    if (hasParticipants) {
+      // Если есть участники - даем полные очки
+      newPoints = currentPoints + 1;
+      console.log(
+        `Прогулка ${walkId} засчитана организатору полностью (+1 прогулка, +1 очко)`
+      );
+    } else {
+      // Если нет участников - даем меньше очков
+      newPoints = currentPoints + 0.2;
+      console.log(
+        `Прогулка ${walkId} засчитана организатору (+1 прогулка, +0.2 очка)`
+      );
+    }
+
+    // Обновляем данные в базе
     await db.collection("users").doc(String(walk.organizer.id)).update({
-      "achievements.walkCount": newOrganizerWalkCount,
+      "achievements.walkCount": newWalkCount,
+      "achievements.organizedCount": newOrganizedCount,
+      "achievements.points": newPoints,
     });
 
-    // ДОБАВИТЬ: Проверка на случайную награду для организатора
-    await checkLuckyTail(walk.organizer.id, newOrganizerWalkCount);
+    // Проверка на случайную награду для организатора
+    // Используем округленное значение очков для проверки "пятёрок"
+    const roundedPoints = Math.round(newPoints);
+    if (roundedPoints % 5 === 0) {
+      await checkLuckyTail(walk.organizer.id, roundedPoints);
+    }
 
-    // Обновляем счетчик прогулок для всех участников
-    if (walk.participants && walk.participants.length > 0) {
+    // Обновляем звания организатора
+    await updateUserRanks(walk.organizer.id);
+
+    // Обновляем счетчики для всех участников (если они есть)
+    if (hasParticipants) {
       for (const participant of walk.participants) {
         // Получаем текущее количество прогулок
         const userDoc = await db
           .collection("users")
           .doc(String(participant.id))
           .get();
-        const newWalkCount = (userDoc.data().achievements.walkCount || 0) + 1;
+
+        if (!userDoc.exists) {
+          console.log(
+            `Профиль участника ${participant.id} не найден, пропускаем`
+          );
+          continue;
+        }
+
+        const userData = userDoc.data();
+        const currentPartWalkCount = userData.achievements?.walkCount || 0;
+        const currentPartPoints = userData.achievements?.points || 0;
+
+        // Участники всегда получают полное увеличение
+        const newPartWalkCount = currentPartWalkCount + 1;
+        const newPartPoints = currentPartPoints + 1;
 
         await db.collection("users").doc(String(participant.id)).update({
-          "achievements.walkCount": newWalkCount,
+          "achievements.walkCount": newPartWalkCount,
+          "achievements.points": newPartPoints,
         });
 
-        // ДОБАВИТЬ: Проверка на случайную награду для участника
-        await checkLuckyTail(participant.id, newWalkCount);
+        // Проверка на случайную награду для участника
+        if (Math.round(newPartPoints) % 5 === 0) {
+          await checkLuckyTail(participant.id, Math.round(newPartPoints));
+        }
 
         // Обновляем звания участника
         await updateUserRanks(participant.id);
@@ -5018,22 +5113,23 @@ bot.action("ranks_info", async (ctx) => {
     Чтобы заработать звания и отметки в DogMeet, важно участвовать в <b>реальных прогулках</b>!
     
     <b>Как это работает:</b>
-    - Звания присваиваются за <b>завершенные прогулки</b> — те, которые реально состоялись
+    - Звания присваиваются за <b>очки достижений</b>, которые начисляются за завершенные прогулки
+    - Прогулка с участниками приносит полное очко (+1)
+    - Регулярная прогулка без участников приносит меньше очков (+0.2)
     - Прогулка считается завершенной через час после указанного времени
-    - Создание прогулки и присоединение к ней не повышают ранг автоматически
-    - Отмена прогулки не приносит очков опыта
+    - Отмена прогулки не приносит очков
     
     <b>Шкала званий:</b>
     - 🐾 Хвостик — новичок
-    - 🐕 Новичок в стае — 1 прогулка
-    - 🐕 Верный друг — 5 прогулок
-    - 🐕 Исследователь парков — 10 прогулок
-    - 🐕 Верный спутник — 20 прогулок
-    - 🐕 Опытный следопыт — 35 прогулок
-    - 🐕 Бродяга со стажем — 50 прогулок
-    - 🐕 Мастер прогулок — 80 прогулок
-    - 🐕 АЛЬФА самец — 120 прогулок
-    - 🐕 Легенда DogMeet — 200+ прогулок
+    - 🐕 Новичок в стае — 1 очко
+    - 🐕 Верный друг — 5 очков
+    - 🐕 Исследователь парков — 10 очков
+    - 🐕 Верный спутник — 20 очков
+    - 🐕 Опытный следопыт — 35 очков
+    - 🐕 Бродяга со стажем — 50 очков
+    - 🐕 Мастер прогулок — 80 очков
+    - 🐕 АЛЬФА самец — 120 очков
+    - 🐕 Легенда DogMeet — 200+ очков
     
     <b>Отметки организатора:</b>
     - 🌟 — 1–9 организованных прогулок
@@ -6057,9 +6153,17 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
     }
 
     const walk = walkDoc.data ? walkDoc.data() : walkDoc;
-    const userDoc = await db.collection("users").doc(String(ctx.from.id)).get();
 
-    const userData = userDoc.data();
+    // Получаем данные организатора прогулки (исправление проблемы с городом)
+    const organizerDoc = await db
+      .collection("users")
+      .doc(String(walk.organizer.id))
+      .get();
+    const organizerData = organizerDoc.exists
+      ? organizerDoc.data()
+      : { city: "Не указан" };
+    const organizerCity = organizerData.city || "Не указан";
+
     // Формируем информацию о местоположении
     let locationInfo = "Не указано";
     if (walk.locationText) {
@@ -6068,12 +6172,20 @@ bot.action(/walk_details_(.+)/, async (ctx) => {
       locationInfo = walk.location.description || "По геолокации";
     }
 
+    // Формируем информацию о дате/времени в зависимости от типа прогулки (исправление)
+    let dateTimeInfo;
+    if (walk.type === "regular") {
+      dateTimeInfo = `🗓 Прогулка: Каждый день, ${walk.time}`;
+    } else {
+      dateTimeInfo = `🗓 Прогулка: ${walk.date}, ${walk.time}`;
+    }
+
     // Формируем детальную информацию о прогулке
     let walkDetails =
       "✨ <b>ДЕТАЛИ ПРОГУЛКИ</b> ✨\n\n" +
       `
-🗓 Прогулка: ${walk.date}, ${walk.time} 
-🏙️Город:  ${userData.city} 
+${dateTimeInfo} 
+🏙️ Город: ${organizerCity} 
 📍 Место: ${locationInfo}  
 🔄 Тип: ${walk.type === "single" ? "Разовая" : "Регулярная"}  
 👤 Организатор: ${walk.organizer.name} ${walk.organizer.username ? "@" + walk.organizer.username : ""}  
@@ -7575,7 +7687,6 @@ bot
   .then(async () => {
     BOT_START_TIME = Date.now(); // Обновляем время запуска
     console.log("Бот DogMeet успешно запущен!");
-    await migrateParticipantsHistory();
   })
   .catch((err) => {
     console.error("Ошибка при запуске бота:", err);
