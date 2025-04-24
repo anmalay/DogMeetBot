@@ -1086,11 +1086,11 @@ async function remindAboutWalks() {
         const [hours, minutes] = walk.time.split(":").map(Number);
 
         // Создаем moment объект с датой и временем прогулки - явно указываем формат
-        // Добавляем 3 часа для компенсации часового пояса
+        // ВЫЧИТАЕМ 3 часа для компенсации часового пояса
         const walkTime = moment(
           `${year}-${month}-${day} ${hours}:${minutes}:00`,
           "YYYY-M-D H:m:s"
-        ).add(3, "hours");
+        ).subtract(3, "hours");
 
         // Проверяем разницу во времени
         const timeToWalkMinutes = walkTime.diff(now, "minutes");
